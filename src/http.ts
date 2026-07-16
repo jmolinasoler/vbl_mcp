@@ -13,6 +13,7 @@ interface SessionInfo {
   id: string;
   client: string;
   clientVersion: string;
+  apiKeyLabel: string;
   ip: string;
   userAgent: string;
   startedAt: Date;
@@ -20,6 +21,26 @@ interface SessionInfo {
   endedAt?: Date;
   toolCalls: Record<string, number>;
   totalCalls: number;
+}
+
+/**
+ * MCP_API_KEYS: comma-separated API keys, each optionally labeled as
+ * "label:key" (e.g. "hermes:abc123,claude:def456"). Labels show up on the
+ * status dashboard so you can tell clients apart. Unlabeled keys get key-N.
+ */
+function parseApiKeys(raw: string | undefined): Map<string, string> {
+  const keys = new Map<string, string>(); // key -> label
+  if (!raw) return keys;
+  raw
+    .split(",")
+    .map((s) => s.trim())
+    .filter(Boolean)
+    .forEach((entry, i) => {
+      const sep = entry.indexOf(":");
+      if (sep > 0) keys.set(entry.slice(sep + 1).trim(), entry.slice(0, sep).trim());
+      else keys.set(entry, `key-${i + 1}`);
+    });
+  return keys;
 }
 
 interface SessionEntry {
@@ -103,6 +124,7 @@ function dashboardHtml(up: NonNullable<typeof upstream>): string {
       (e) => `<tr>
         <td><code>${esc(e.info.id.slice(0, 8))}…</code></td>
         <td>${esc(e.info.client)} <span class="dim">${esc(e.info.clientVersion)}</span></td>
+        <td>${esc(e.info.apiKeyLabel)}</td>
         <td>${esc(e.info.ip)}</td>
         <td>${esc(fmtAgo(e.info.startedAt))}</td>
         <td>${esc(fmtAgo(e.info.lastSeenAt))}</td>
@@ -115,6 +137,7 @@ function dashboardHtml(up: NonNullable<typeof upstream>): string {
       (i) => `<tr>
         <td><code>${esc(i.id.slice(0, 8))}…</code></td>
         <td>${esc(i.client)} <span class="dim">${esc(i.clientVersion)}</span></td>
+        <td>${esc(i.apiKeyLabel)}</td>
         <td>${esc(i.ip)}</td>
         <td>${esc(fmtAgo(i.startedAt))}</td>
         <td>${i.endedAt ? esc(fmtAgo(i.endedAt)) : "-"}</td>
@@ -186,7 +209,7 @@ function dashboardHtml(up: NonNullable<typeof upstream>): string {
 <section>
   <h2>Active sessions (who is connected now)</h2>
   ${sessionRows
-    ? `<table><thead><tr><th>Session</th><th>Client</th><th>IP</th><th>Connected</th><th>Last activity</th><th>Calls</th></tr></thead><tbody>${sessionRows}</tbody></table>`
+    ? `<table><thead><tr><th>Session</th><th>Client</th><th>API key</th><th>IP</th><th>Connected</th><th>Last activity</th><th>Calls</th></tr></thead><tbody>${sessionRows}</tbody></table>`
     : `<div class="empty">No active sessions.</div>`}
 </section>
 <section>
@@ -204,7 +227,7 @@ function dashboardHtml(up: NonNullable<typeof upstream>): string {
 <section>
   <h2>Recently ended sessions</h2>
   ${endedRows
-    ? `<table><thead><tr><th>Session</th><th>Client</th><th>IP</th><th>Connected</th><th>Ended</th><th>Calls</th></tr></thead><tbody>${endedRows}</tbody></table>`
+    ? `<table><thead><tr><th>Session</th><th>Client</th><th>API key</th><th>IP</th><th>Connected</th><th>Ended</th><th>Calls</th></tr></thead><tbody>${endedRows}</tbody></table>`
     : `<div class="empty">None yet.</div>`}
 </section>
 <footer>Started ${esc(startedAt.toISOString())} · auto-refreshes every 15s · in-memory stats (reset on restart)</footer>
@@ -217,14 +240,18 @@ export function startHttp(port: number) {
   app.set("trust proxy", true);
   app.use(express.json({ limit: "1mb" }));
 
-  const authToken = process.env.MCP_AUTH_TOKEN;
+  const apiKeys = parseApiKeys(process.env.MCP_API_KEYS);
   const requireAuth = (req: Request, res: Response, next: NextFunction) => {
-    if (!authToken) return next();
-    const header = req.header("authorization");
-    if (header === `Bearer ${authToken}`) return next();
+    if (apiKeys.size === 0) return next();
+    const key = req.header("x-api-key");
+    const label = key ? apiKeys.get(key) : undefined;
+    if (label) {
+      res.locals.apiKeyLabel = label;
+      return next();
+    }
     res.status(401).json({
       jsonrpc: "2.0",
-      error: { code: -32001, message: "Unauthorized: missing or invalid bearer token" },
+      error: { code: -32001, message: "Unauthorized: missing or invalid X-API-Key header" },
       id: null,
     });
   };
@@ -267,6 +294,7 @@ export function startHttp(port: number) {
           id: "(pending)",
           client: "unknown",
           clientVersion: "",
+          apiKeyLabel: (res.locals.apiKeyLabel as string) ?? "-",
           ip: clientIp(req),
           userAgent: req.header("user-agent") ?? "",
           startedAt: new Date(),
@@ -339,6 +367,7 @@ export function startHttp(port: number) {
     console.log(`  MCP endpoint:  POST /mcp`);
     console.log(`  Status page:   GET /`);
     console.log(`  Health check:  GET /health`);
-    if (authToken) console.log("  Auth: bearer token required on /mcp");
+    if (apiKeys.size > 0)
+      console.log(`  Auth: X-API-Key required on /mcp (${apiKeys.size} key(s) configured)`);
   });
 }

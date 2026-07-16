@@ -3,17 +3,17 @@
 - [docker-compose.coolify.yml](docker-compose.coolify.yml) — Docker Compose file for deploying vbl-mcp on Coolify, either from the prebuilt Docker Hub image or building from this repository. Includes the Coolify `SERVICE_FQDN` magic variable for automatic domain wiring and a container health check against `/health`.
 - [skills/vbl/](skills/vbl/SKILL.md) — example Agent Skill: invoke `/vbl <question>` and it runs the right queries against this server (GUID conventions, Dutch field glossary and workflows built in).
 
-A public instance runs at **https://vblmcp.valvestudio.io** (dashboard at `/`, health at `/health`, MCP endpoint at `/mcp`, bearer token required).
+A public instance runs at **https://vblmcp.valvestudio.io** (dashboard at `/`, health at `/health`, MCP endpoint at `/mcp`, API key required).
 
 ## Connecting an MCP client
 
-All examples point at the public instance; replace the URL with your own deployment and `<token>` with the value of its `MCP_AUTH_TOKEN`.
+All examples point at the public instance; replace the URL with your own deployment and `<key>` with one of the keys configured in its `MCP_API_KEYS`.
 
 ### Claude Code
 
 ```bash
 claude mcp add --transport http vbl https://vblmcp.valvestudio.io/mcp \
-  --header "Authorization: Bearer <token>"
+  --header "X-API-Key: <key>"
 ```
 
 ### Hermes or any client with JSON MCP config (Streamable HTTP)
@@ -25,7 +25,7 @@ claude mcp add --transport http vbl https://vblmcp.valvestudio.io/mcp \
       "type": "http",
       "url": "https://vblmcp.valvestudio.io/mcp",
       "headers": {
-        "Authorization": "Bearer <token>"
+        "X-API-Key": "<key>"
       }
     }
   }
@@ -45,12 +45,14 @@ Bridge with [`mcp-remote`](https://www.npmjs.com/package/mcp-remote):
         "mcp-remote",
         "https://vblmcp.valvestudio.io/mcp",
         "--header",
-        "Authorization: Bearer <token>"
+        "X-API-Key: <key>"
       ]
     }
   }
 }
 ```
+
+Tip: give each client its own labeled key (`MCP_API_KEYS="hermes:key1,claude:key2"`) and the server's dashboard will show which client each session belongs to.
 
 ## Installing the example skill
 

@@ -17,7 +17,7 @@ Official API documentation: [ApiDocV2.pdf](docs/ApiDocV2.pdf) ([source](https://
 - **Two transports**: stdio (local MCP clients) and Streamable HTTP (`/mcp`) for deployments.
 - **Status dashboard** at `/` (HTTP mode): uptime, active sessions with client name/IP/last activity, tool-usage counters and a recent-calls log — so you can see who is using the server. Auto-refreshes every 15 s; stats are in-memory and reset on restart.
 - **Health endpoint** at `/health`: JSON with uptime, session/call counters and a cached (60 s) reachability check of the upstream VBL API.
-- **Optional bearer auth**: set `MCP_AUTH_TOKEN` to require `Authorization: Bearer <token>` on `/mcp` (the dashboard and `/health` stay open).
+- **Optional API key auth**: set `MCP_API_KEYS` to require an `X-API-Key` header on `/mcp` (the dashboard and `/health` stay open). Multiple keys are supported and can be labeled per client (`hermes:key1,claude:key2`) — the label shows on the dashboard next to each session.
 
 ## Tools
 
@@ -62,7 +62,7 @@ To use a deployed instance over HTTP instead:
 ```bash
 claude mcp add --transport http vbl https://your-domain.example/mcp
 # with auth:
-claude mcp add --transport http vbl https://your-domain.example/mcp --header "Authorization: Bearer <token>"
+claude mcp add --transport http vbl https://your-domain.example/mcp --header "X-API-Key: <key>"
 ```
 
 ### Claude Desktop
@@ -92,8 +92,8 @@ Run it:
 
 ```bash
 docker run -d --name vbl-mcp -p 3000:3000 vbl-mcp
-# optionally protect the MCP endpoint:
-docker run -d --name vbl-mcp -p 3000:3000 -e MCP_AUTH_TOKEN=change-me vbl-mcp
+# optionally protect the MCP endpoint with one or more API keys:
+docker run -d --name vbl-mcp -p 3000:3000 -e MCP_API_KEYS="hermes:change-me,claude:change-me-too" vbl-mcp
 ```
 
 Verify:
@@ -111,7 +111,7 @@ The image is a multi-stage build (Node 22 alpine, dev dependencies pruned, runs 
 |---|---|---|
 | `PORT` | `3000` | HTTP listen port |
 | `MCP_TRANSPORT` | – | Set to `http` to force HTTP mode (the container CMD already passes `--http`) |
-| `MCP_AUTH_TOKEN` | – | If set, `/mcp` requires `Authorization: Bearer <token>` |
+| `MCP_API_KEYS` | – | If set, `/mcp` requires a valid `X-API-Key` header. Comma-separated keys, each optionally labeled: `label:key,label2:key2` (labels identify clients on the dashboard) |
 
 ## Publishing to Docker Hub
 
@@ -139,7 +139,7 @@ docker push jmolinaso/vbl-mcp:latest
 
 1. In Coolify: **+ New → Docker Image** and enter the image name: `jmolinaso/vbl-mcp:latest`.
 2. **Ports Exposes**: `3000`.
-3. (Recommended) Add the environment variable `MCP_AUTH_TOKEN` with a strong secret so only your clients can call `/mcp`.
+3. (Recommended) Add the environment variable `MCP_API_KEYS` with one or more strong keys (`hermes:key1,claude:key2`) so only your clients can call `/mcp`.
 4. (Optional) In **Health Checks**, set the path to `/health` on port `3000` — or rely on the image's built-in Docker `HEALTHCHECK`.
 5. Assign a domain and deploy. Coolify handles HTTPS via its proxy.
 
@@ -149,7 +149,7 @@ To pick up a new version, push the updated image and hit **Redeploy** (with the 
 
 1. In Coolify: **+ New → Application**, choose **Public Repository** and enter `https://github.com/jmolinasoler/vbl_mcp` (branch `main`).
 2. **Build Pack**: `Dockerfile` (Coolify detects the `Dockerfile` at the repo root automatically).
-3. Continue with steps 2-5 of Option A (port `3000`, `MCP_AUTH_TOKEN`, health check, domain).
+3. Continue with steps 2-5 of Option A (port `3000`, `MCP_API_KEYS`, health check, domain).
 
 ### Option C — Docker Compose
 

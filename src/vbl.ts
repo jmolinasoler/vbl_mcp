@@ -8,7 +8,7 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 
-export const VERSION = "0.2.0";
+export const VERSION = "0.3.0";
 export const BASE_URL = "http://vblcb.wisseq.eu/VBLCB_WebService/data";
 
 export type ToolCallListener = (tool: string, args: Record<string, unknown>) => void;

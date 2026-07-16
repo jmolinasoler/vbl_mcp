@@ -24,9 +24,11 @@ services:
       # points it at port 3000 of this service.
       - SERVICE_FQDN_VBLMCP_3000
       - PORT=3000
-      # Recommended: require "Authorization: Bearer <token>" on /mcp.
-      # Define the value in Coolify → Environment Variables.
-      # - MCP_AUTH_TOKEN=${MCP_AUTH_TOKEN}
+      # Recommended: require an X-API-Key header on /mcp. Comma-separated
+      # keys, optionally labeled per client ("hermes:key1,claude:key2" —
+      # labels show on the status dashboard). Define the value in
+      # Coolify → Environment Variables.
+      # - MCP_API_KEYS=${MCP_API_KEYS}
     healthcheck:
       test: ["CMD", "wget", "-qO-", "http://127.0.0.1:3000/health"]
       interval: 30s
