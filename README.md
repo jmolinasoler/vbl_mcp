@@ -4,7 +4,9 @@
 
 MCP (Model Context Protocol) server for the public **Basketball Vlaanderen** (VBL) API — the `vblcb.wisseq.eu` backend used by [basketbal.vlaanderen](https://www.basketbal.vlaanderen). Read-only.
 
-Repository: [github.com/jmolinasoler/vbl_mcp](https://github.com/jmolinasoler/vbl_mcp)
+Repository: [github.com/jmolinasoler/vbl_mcp](https://github.com/jmolinasoler/vbl_mcp) · Docker image: [jmolinaso/vbl-mcp](https://hub.docker.com/r/jmolinaso/vbl-mcp) · Public instance: [vblmcp.valvestudio.io](https://vblmcp.valvestudio.io/)
+
+See [examples/](examples/README.md) for ready-made MCP client configurations (Claude Code, Hermes, stdio-only clients via `mcp-remote`), a Coolify Docker Compose file, and an example [Agent Skill](examples/skills/vbl-basketball/SKILL.md) that teaches a client how to use this server.
 
 Official API documentation: [ApiDocV2.pdf](docs/ApiDocV2.pdf) ([source](https://www.basketbal.vlaanderen/documenten/Clubondersteuning/ApiDocV2.pdf)).
 
