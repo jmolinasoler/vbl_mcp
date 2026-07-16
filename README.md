@@ -1,6 +1,10 @@
 # vbl-mcp
 
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+
 MCP (Model Context Protocol) server for the public **Basketball Vlaanderen** (VBL) API — the `vblcb.wisseq.eu` backend used by [basketbal.vlaanderen](https://www.basketbal.vlaanderen). Read-only.
+
+Repository: [github.com/jmolinasoler/vbl_mcp](https://github.com/jmolinasoler/vbl_mcp)
 
 Official API documentation: [ApiDocV2.pdf](docs/ApiDocV2.pdf) ([source](https://www.basketbal.vlaanderen/documenten/Clubondersteuning/ApiDocV2.pdf)).
 
@@ -31,6 +35,8 @@ Official API documentation: [ApiDocV2.pdf](docs/ApiDocV2.pdf) ([source](https://
 ## Local development
 
 ```bash
+git clone https://github.com/jmolinasoler/vbl_mcp.git
+cd vbl_mcp
 npm install
 npm run build
 
@@ -75,6 +81,8 @@ claude mcp add --transport http vbl https://your-domain.example/mcp --header "Au
 Build the image:
 
 ```bash
+git clone https://github.com/jmolinasoler/vbl_mcp.git
+cd vbl_mcp
 docker build -t vbl-mcp .
 ```
 
@@ -105,13 +113,12 @@ The image is a multi-stage build (Node 22 alpine, dev dependencies pruned, runs 
 
 ## Deploying on Coolify
 
-1. Push this repository to a Git provider Coolify can reach (GitHub, GitLab, Gitea, …).
-2. In Coolify: **+ New → Application**, pick the repository and branch.
-3. **Build Pack**: `Dockerfile` (Coolify detects the `Dockerfile` at the repo root automatically).
-4. **Ports Exposes**: `3000`.
-5. (Recommended) Add the environment variable `MCP_AUTH_TOKEN` with a strong secret so only your clients can call `/mcp`.
-6. (Optional) In **Health Checks**, set the path to `/health` on port `3000` — or rely on the image's built-in Docker `HEALTHCHECK`.
-7. Assign a domain and deploy. Coolify handles HTTPS via its proxy.
+1. In Coolify: **+ New → Application**, choose **Public Repository** and enter `https://github.com/jmolinasoler/vbl_mcp` (branch `main`).
+2. **Build Pack**: `Dockerfile` (Coolify detects the `Dockerfile` at the repo root automatically).
+3. **Ports Exposes**: `3000`.
+4. (Recommended) Add the environment variable `MCP_AUTH_TOKEN` with a strong secret so only your clients can call `/mcp`.
+5. (Optional) In **Health Checks**, set the path to `/health` on port `3000` — or rely on the image's built-in Docker `HEALTHCHECK`.
+6. Assign a domain and deploy. Coolify handles HTTPS via its proxy.
 
 After deploying:
 
@@ -132,3 +139,7 @@ After deploying:
 - Field names are Dutch (`naam` = name, `plaats` = city, `uitslag` = result, `gespeeld` = played, `tT`/`tU` = home/away team, `wedPunt` = competition points, `ptVoor`/`ptTegen` = points for/against).
 - The officially documented endpoints are the five wisseq methods in the table (`OrgDetailByGuid`, `OrgMatchesByGuid`, `RelatiesByOrgGuid`, `TeamDetailByGuid`, `TeamMatchesByGuid`). `OrgList`, `PouleMatchesByGuid`, `MatchesByWedGuid` and the DWF endpoints live on the same backend and are used by the official website, but are not part of the PDF.
 - Errors use standard HTTP status codes (400, 404, 500, …) per the official document.
+
+## License
+
+[MIT](LICENSE) — © 2026 Julio Molina Soler. Note that the license covers this server's code only; usage of the VBL API itself is subject to the terms quoted at the top of this README.

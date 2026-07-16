@@ -2,6 +2,16 @@
   "name": "vbl-mcp",
   "version": "0.2.0",
   "description": "MCP server for the Basketball Vlaanderen (VBL) public API",
+  "license": "MIT",
+  "author": "Julio Molina Soler",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/jmolinasoler/vbl_mcp.git"
+  },
+  "homepage": "https://github.com/jmolinasoler/vbl_mcp#readme",
+  "bugs": {
+    "url": "https://github.com/jmolinasoler/vbl_mcp/issues"
+  },
   "type": "module",
   "bin": {
     "vbl-mcp": "dist/index.js"
