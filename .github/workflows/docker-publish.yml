@@ -9,6 +9,8 @@ on:
 jobs:
   build-and-push:
     runs-on: ubuntu-latest
+    # Skips cleanly until the Docker Hub secrets are configured in the repo.
+    if: ${{ secrets.DOCKERHUB_USERNAME != '' }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
