@@ -117,7 +117,7 @@ The image is a multi-stage build (Node 22 alpine, dev dependencies pruned, runs 
 
 The repo ships a workflow ([.github/workflows/docker-publish.yml](.github/workflows/docker-publish.yml)) that builds a multi-arch image (`linux/amd64` + `linux/arm64`) and pushes it to Docker Hub on every push to `main` and on version tags (`v*`). One-time setup:
 
-1. On Docker Hub, create the repository `<your-dockerhub-user>/vbl-mcp` and an access token (**Account Settings → Personal access tokens**, *Read & Write*).
+1. On Docker Hub, create the repository (published as [`jmolinaso/vbl-mcp`](https://hub.docker.com/r/jmolinaso/vbl-mcp)) and an access token (**Account Settings → Personal access tokens**, *Read & Write*).
 2. On GitHub (**Settings → Secrets and variables → Actions**), add two repository secrets:
    - `DOCKERHUB_USERNAME` — your Docker Hub username
    - `DOCKERHUB_TOKEN` — the access token
@@ -127,15 +127,15 @@ The repo ships a workflow ([.github/workflows/docker-publish.yml](.github/workfl
 
 ```bash
 docker login
-docker build -t <your-dockerhub-user>/vbl-mcp:latest .
-docker push <your-dockerhub-user>/vbl-mcp:latest
+docker build -t jmolinaso/vbl-mcp:latest .
+docker push jmolinaso/vbl-mcp:latest
 ```
 
 ## Deploying on Coolify
 
 ### Option A — from Docker Hub (recommended once published)
 
-1. In Coolify: **+ New → Docker Image** and enter the image name, e.g. `<your-dockerhub-user>/vbl-mcp:latest`.
+1. In Coolify: **+ New → Docker Image** and enter the image name: `jmolinaso/vbl-mcp:latest`.
 2. **Ports Exposes**: `3000`.
 3. (Recommended) Add the environment variable `MCP_AUTH_TOKEN` with a strong secret so only your clients can call `/mcp`.
 4. (Optional) In **Health Checks**, set the path to `/health` on port `3000` — or rely on the image's built-in Docker `HEALTHCHECK`.

@@ -13,7 +13,7 @@ services:
     # Prebuilt image from Docker Hub — replace with your Docker Hub username
     # if you publish under a different account (see "Publishing to Docker Hub"
     # in the README).
-    image: jmolinasoler/vbl-mcp:latest
+    image: jmolinaso/vbl-mcp:latest
     # To build from the repository instead of pulling the image, remove the
     # `image:` line above and uncomment:
     # build:
