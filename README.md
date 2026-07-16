@@ -149,6 +149,10 @@ To pick up a new version, push the updated image and hit **Redeploy** (with the 
 2. **Build Pack**: `Dockerfile` (Coolify detects the `Dockerfile` at the repo root automatically).
 3. Continue with steps 2-5 of Option A (port `3000`, `MCP_AUTH_TOKEN`, health check, domain).
 
+### Option C — Docker Compose
+
+A ready-made compose file lives at [examples/docker-compose.coolify.yml](examples/docker-compose.coolify.yml): pick **Build Pack: Docker Compose** with that file as *Docker Compose Location*, or paste it into **+ New → Docker Compose Empty**. It pulls the Docker Hub image (or optionally builds from the repo), wires the domain via Coolify's `SERVICE_FQDN` magic variable and includes the `/health` container health check.
+
 After deploying:
 
 - `https://your-domain/` — status dashboard (who is connected, tool usage).

@@ -1,0 +1,36 @@
+# Docker Compose file for deploying vbl-mcp on Coolify.
+#
+# Use it in either of two ways:
+#   a) + New → Application → Public Repository → https://github.com/jmolinasoler/vbl_mcp
+#      Build Pack: "Docker Compose", Docker Compose Location: examples/docker-compose.coolify.yml
+#   b) + New → Docker Compose Empty → paste this file.
+#
+# Coolify's proxy terminates HTTPS and routes the domain, so no host port
+# mapping is needed here.
+
+services:
+  vbl-mcp:
+    # Prebuilt image from Docker Hub — replace with your Docker Hub username
+    # if you publish under a different account (see "Publishing to Docker Hub"
+    # in the README).
+    image: jmolinasoler/vbl-mcp:latest
+    # To build from the repository instead of pulling the image, remove the
+    # `image:` line above and uncomment:
+    # build:
+    #   context: ..
+    #   dockerfile: Dockerfile
+    environment:
+      # Coolify magic variable: auto-generates/assigns the public URL and
+      # points it at port 3000 of this service.
+      - SERVICE_FQDN_VBLMCP_3000
+      - PORT=3000
+      # Recommended: require "Authorization: Bearer <token>" on /mcp.
+      # Define the value in Coolify → Environment Variables.
+      # - MCP_AUTH_TOKEN=${MCP_AUTH_TOKEN}
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:3000/health"]
+      interval: 30s
+      timeout: 5s
+      start_period: 10s
+      retries: 3
+    restart: unless-stopped
