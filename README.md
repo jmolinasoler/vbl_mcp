@@ -111,14 +111,43 @@ The image is a multi-stage build (Node 22 alpine, dev dependencies pruned, runs 
 | `MCP_TRANSPORT` | – | Set to `http` to force HTTP mode (the container CMD already passes `--http`) |
 | `MCP_AUTH_TOKEN` | – | If set, `/mcp` requires `Authorization: Bearer <token>` |
 
+## Publishing to Docker Hub
+
+### Automatically (GitHub Actions)
+
+The repo ships a workflow ([.github/workflows/docker-publish.yml](.github/workflows/docker-publish.yml)) that builds a multi-arch image (`linux/amd64` + `linux/arm64`) and pushes it to Docker Hub on every push to `main` and on version tags (`v*`). One-time setup:
+
+1. On Docker Hub, create the repository `<your-dockerhub-user>/vbl-mcp` and an access token (**Account Settings → Personal access tokens**, *Read & Write*).
+2. On GitHub (**Settings → Secrets and variables → Actions**), add two repository secrets:
+   - `DOCKERHUB_USERNAME` — your Docker Hub username
+   - `DOCKERHUB_TOKEN` — the access token
+3. Push to `main` (publishes `:latest` and `:sha-…`) or tag a release (`git tag v0.2.0 && git push --tags` publishes `:0.2.0` and `:0.2`).
+
+### Manually
+
+```bash
+docker login
+docker build -t <your-dockerhub-user>/vbl-mcp:latest .
+docker push <your-dockerhub-user>/vbl-mcp:latest
+```
+
 ## Deploying on Coolify
+
+### Option A — from Docker Hub (recommended once published)
+
+1. In Coolify: **+ New → Docker Image** and enter the image name, e.g. `<your-dockerhub-user>/vbl-mcp:latest`.
+2. **Ports Exposes**: `3000`.
+3. (Recommended) Add the environment variable `MCP_AUTH_TOKEN` with a strong secret so only your clients can call `/mcp`.
+4. (Optional) In **Health Checks**, set the path to `/health` on port `3000` — or rely on the image's built-in Docker `HEALTHCHECK`.
+5. Assign a domain and deploy. Coolify handles HTTPS via its proxy.
+
+To pick up a new version, push the updated image and hit **Redeploy** (with the `:latest` tag Coolify re-pulls the image; pin a version tag like `:0.2.0` if you prefer explicit upgrades).
+
+### Option B — build from the Git repository
 
 1. In Coolify: **+ New → Application**, choose **Public Repository** and enter `https://github.com/jmolinasoler/vbl_mcp` (branch `main`).
 2. **Build Pack**: `Dockerfile` (Coolify detects the `Dockerfile` at the repo root automatically).
-3. **Ports Exposes**: `3000`.
-4. (Recommended) Add the environment variable `MCP_AUTH_TOKEN` with a strong secret so only your clients can call `/mcp`.
-5. (Optional) In **Health Checks**, set the path to `/health` on port `3000` — or rely on the image's built-in Docker `HEALTHCHECK`.
-6. Assign a domain and deploy. Coolify handles HTTPS via its proxy.
+3. Continue with steps 2-5 of Option A (port `3000`, `MCP_AUTH_TOKEN`, health check, domain).
 
 After deploying:
 
