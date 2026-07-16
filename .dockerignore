@@ -1,0 +1,9 @@
+node_modules
+dist
+docs
+.git
+.gitignore
+.mcp.json
+.claude
+README.md
+*.log
