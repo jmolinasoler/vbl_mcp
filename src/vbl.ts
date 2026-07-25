@@ -8,10 +8,22 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 
-export const VERSION = "0.3.0";
+export const VERSION = "0.4.0";
 export const BASE_URL = "http://vblcb.wisseq.eu/VBLCB_WebService/data";
 
-export type ToolCallListener = (tool: string, args: Record<string, unknown>) => void;
+/** Completed tool call with usage metering (tokens are chars/4 estimates). */
+export interface ToolCallRecord {
+  tool: string;
+  tokensIn: number;
+  tokensOut: number;
+  durationMs: number;
+  isError: boolean;
+}
+
+export type ToolCallListener = (record: ToolCallRecord) => void;
+
+/** Rough token estimate: ~4 characters per token, same heuristic as LLM pricing calculators. */
+export const estimateTokens = (chars: number) => Math.ceil(chars / 4);
 
 async function apiGet(path: string, params: Record<string, string>): Promise<unknown> {
   const qs = Object.entries(params)
@@ -89,8 +101,20 @@ export function createServer(onToolCall?: ToolCallListener): McpServer {
     handler: (args: any) => Promise<{ content: { type: "text"; text: string }[]; isError?: boolean }>
   ) => {
     server.registerTool(name, config as any, (async (args: any) => {
-      onToolCall?.(name, args ?? {});
-      return handler(args ?? {});
+      const started = Date.now();
+      const result = await handler(args ?? {});
+      if (onToolCall) {
+        const inChars = JSON.stringify(args ?? {}).length;
+        const outChars = result.content.reduce((n, c) => n + (c.text?.length ?? 0), 0);
+        onToolCall({
+          tool: name,
+          tokensIn: estimateTokens(inChars),
+          tokensOut: estimateTokens(outChars),
+          durationMs: Date.now() - started,
+          isError: result.isError === true,
+        });
+      }
+      return result;
     }) as any);
   };
 

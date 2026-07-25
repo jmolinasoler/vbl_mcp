@@ -24,11 +24,16 @@ services:
       # points it at port 3000 of this service.
       - SERVICE_FQDN_VBLMCP_3000
       - PORT=3000
-      # Recommended: require an X-API-Key header on /mcp. Comma-separated
-      # keys, optionally labeled per client ("hermes:key1,claude:key2" —
-      # labels show on the status dashboard). Define the value in
+      # Recommended: enables the key-management panel on the dashboard and
+      # the /admin/keys API. Create per-client API keys from there; clients
+      # then call /mcp with an X-API-Key header. Define the value in
       # Coolify → Environment Variables.
+      # - ADMIN_TOKEN=${ADMIN_TOKEN}
+      # Optional: seed API keys ("hermes:key1,claude:key2").
       # - MCP_API_KEYS=${MCP_API_KEYS}
+    volumes:
+      # API keys and usage metering (billing data) persist here.
+      - vbl-mcp-data:/app/data
     healthcheck:
       test: ["CMD", "wget", "-qO-", "http://127.0.0.1:3000/health"]
       interval: 30s
@@ -36,3 +41,6 @@ services:
       start_period: 10s
       retries: 3
     restart: unless-stopped
+
+volumes:
+  vbl-mcp-data:
