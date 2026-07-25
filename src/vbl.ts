@@ -9,7 +9,13 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 
 export const VERSION = "0.4.0";
-export const BASE_URL = "http://vblcb.wisseq.eu/VBLCB_WebService/data";
+export const DEFAULT_BASE_URL = "http://vblcb.wisseq.eu/VBLCB_WebService/data";
+
+/**
+ * Upstream API root. Resolved per call so it can be pointed at the wisseq dev
+ * backend (VBLCB_WebServiceDev) or at a fake server in tests via VBL_BASE_URL.
+ */
+export const baseUrl = () => process.env.VBL_BASE_URL ?? DEFAULT_BASE_URL;
 
 /** Completed tool call with usage metering (tokens are chars/4 estimates). */
 export interface ToolCallRecord {
@@ -29,7 +35,7 @@ async function apiGet(path: string, params: Record<string, string>): Promise<unk
   const qs = Object.entries(params)
     .map(([k, v]) => `${k}=${encodeURIComponent(v)}`)
     .join("&");
-  const res = await fetch(`${BASE_URL}/${path}?${qs}`);
+  const res = await fetch(`${baseUrl()}/${path}?${qs}`);
   if (!res.ok) {
     throw new Error(`VBL API error ${res.status}: ${(await res.text()).slice(0, 300)}`);
   }
@@ -41,7 +47,7 @@ async function apiPutDwf(path: string, params: Record<string, string>): Promise<
   const qs = Object.entries(params)
     .map(([k, v]) => `${k}=${encodeURIComponent(v)}`)
     .join("&");
-  const res = await fetch(`${BASE_URL}/${path}?${qs}`, {
+  const res = await fetch(`${baseUrl()}/${path}?${qs}`, {
     method: "PUT",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ AuthHeader: "na", WQVer: "wqd2.0", CRUD: "GET" }),

@@ -16,7 +16,7 @@ import express, { type Request, type Response, type NextFunction } from "express
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { isInitializeRequest } from "@modelcontextprotocol/sdk/types.js";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-import { createServer, BASE_URL, VERSION } from "./vbl.js";
+import { createServer, baseUrl, VERSION } from "./vbl.js";
 import { Store } from "./store.js";
 
 interface SessionInfo {
@@ -52,18 +52,39 @@ interface CallLogEntry {
   isError: boolean;
 }
 
-const startedAt = new Date();
-const sessions = new Map<string, SessionEntry>();
-const endedSessions: SessionInfo[] = []; // most recent first, capped
-const toolTotals: Record<string, { requests: number; tokensIn: number; tokensOut: number }> = {};
-const recentCalls: CallLogEntry[] = []; // most recent first, capped
-let totalSessions = 0;
-let totalCalls = 0;
-let totalTokensIn = 0;
-let totalTokensOut = 0;
+/**
+ * Per-app runtime state. Kept out of module scope so several instances can
+ * coexist (tests spin up isolated apps; production creates exactly one).
+ */
+interface AppState {
+  startedAt: Date;
+  sessions: Map<string, SessionEntry>;
+  endedSessions: SessionInfo[]; // most recent first, capped
+  toolTotals: Record<string, { requests: number; tokensIn: number; tokensOut: number }>;
+  recentCalls: CallLogEntry[]; // most recent first, capped
+  totalSessions: number;
+  totalCalls: number;
+  totalTokensIn: number;
+  totalTokensOut: number;
+  upstream: { status: "ok" | "error"; detail: string; checkedAt: Date } | null;
+}
+
+const createState = (): AppState => ({
+  startedAt: new Date(),
+  sessions: new Map(),
+  endedSessions: [],
+  toolTotals: {},
+  recentCalls: [],
+  totalSessions: 0,
+  totalCalls: 0,
+  totalTokensIn: 0,
+  totalTokensOut: 0,
+  upstream: null,
+});
 
 const MAX_ENDED = 25;
 const MAX_RECENT = 50;
+const UPSTREAM_CACHE_MS = 60_000;
 
 /**
  * MCP_API_KEYS: comma-separated API keys, each optionally labeled as
@@ -85,30 +106,32 @@ function parseApiKeys(raw: string | undefined): Map<string, string> {
   return keys;
 }
 
-// Cached upstream (VBL API) reachability check for /health and the dashboard.
-let upstream: { status: "ok" | "error"; detail: string; checkedAt: Date } | null = null;
-async function checkUpstream(): Promise<NonNullable<typeof upstream>> {
-  if (upstream && Date.now() - upstream.checkedAt.getTime() < 60_000) return upstream;
+type UpstreamStatus = NonNullable<AppState["upstream"]>;
+
+/** Cached upstream (VBL API) reachability check for /health and the dashboard. */
+async function checkUpstream(state: AppState): Promise<UpstreamStatus> {
+  const cached = state.upstream;
+  if (cached && Date.now() - cached.checkedAt.getTime() < UPSTREAM_CACHE_MS) return cached;
   try {
     const ctrl = new AbortController();
     const t = setTimeout(() => ctrl.abort(), 5000);
-    const res = await fetch(`${BASE_URL}/TeamDetailByGuid?teamguid=HEALTHCHECK`, {
+    const res = await fetch(`${baseUrl()}/TeamDetailByGuid?teamguid=HEALTHCHECK`, {
       signal: ctrl.signal,
     });
     clearTimeout(t);
-    upstream = {
+    state.upstream = {
       status: res.ok ? "ok" : "error",
       detail: `HTTP ${res.status}`,
       checkedAt: new Date(),
     };
   } catch (e) {
-    upstream = {
+    state.upstream = {
       status: "error",
       detail: e instanceof Error ? e.message : String(e),
       checkedAt: new Date(),
     };
   }
-  return upstream;
+  return state.upstream;
 }
 
 function clientIp(req: Request): string {
@@ -116,13 +139,13 @@ function clientIp(req: Request): string {
   return (fwd ? fwd.split(",")[0].trim() : req.socket.remoteAddress) ?? "unknown";
 }
 
-function endSession(id: string) {
-  const entry = sessions.get(id);
+function endSession(state: AppState, id: string) {
+  const entry = state.sessions.get(id);
   if (!entry) return;
-  sessions.delete(id);
+  state.sessions.delete(id);
   entry.info.endedAt = new Date();
-  endedSessions.unshift(entry.info);
-  if (endedSessions.length > MAX_ENDED) endedSessions.pop();
+  state.endedSessions.unshift(entry.info);
+  if (state.endedSessions.length > MAX_ENDED) state.endedSessions.pop();
 }
 
 const esc = (s: unknown) =>
@@ -139,13 +162,19 @@ function fmtAgo(d: Date | string): string {
   return `${Math.floor(s / 86400)}d ago`;
 }
 
-function fmtUptime(): string {
+function fmtUptime(startedAt: Date): string {
   const s = Math.floor((Date.now() - startedAt.getTime()) / 1000);
   const d = Math.floor(s / 86400), h = Math.floor((s % 86400) / 3600), m = Math.floor((s % 3600) / 60);
   return d ? `${d}d ${h}h ${m}m` : h ? `${h}h ${m}m` : `${m}m ${s % 60}s`;
 }
 
-function dashboardHtml(store: Store, adminEnabled: boolean, up: NonNullable<typeof upstream>): string {
+function dashboardHtml(
+  store: Store,
+  state: AppState,
+  adminEnabled: boolean,
+  up: UpstreamStatus
+): string {
+  const { startedAt, sessions, endedSessions, toolTotals, recentCalls } = state;
   const sessionRows = [...sessions.values()]
     .sort((a, b) => b.info.lastSeenAt.getTime() - a.info.lastSeenAt.getTime())
     .map(
@@ -269,11 +298,11 @@ function dashboardHtml(store: Store, adminEnabled: boolean, up: NonNullable<type
 <h1>🏀 vbl-mcp <span class="v">v${esc(VERSION)}</span></h1>
 <div class="sub">MCP server for the Basketball Vlaanderen API — endpoint <code>/mcp</code>, health <code>/health</code></div>
 <div class="cards">
-  <div class="card"><div class="label">Uptime</div><div class="value">${esc(fmtUptime())}</div></div>
+  <div class="card"><div class="label">Uptime</div><div class="value">${esc(fmtUptime(startedAt))}</div></div>
   <div class="card"><div class="label">Active sessions</div><div class="value">${sessions.size}</div></div>
-  <div class="card"><div class="label">Total sessions</div><div class="value">${totalSessions}</div></div>
-  <div class="card"><div class="label">Tool calls</div><div class="value">${fmtNum(totalCalls)}</div></div>
-  <div class="card"><div class="label">Tokens in / out</div><div class="value">${fmtNum(totalTokensIn)} / ${fmtNum(totalTokensOut)}</div><div class="dim">since start, ≈ chars ÷ 4</div></div>
+  <div class="card"><div class="label">Total sessions</div><div class="value">${state.totalSessions}</div></div>
+  <div class="card"><div class="label">Tool calls</div><div class="value">${fmtNum(state.totalCalls)}</div></div>
+  <div class="card"><div class="label">Tokens in / out</div><div class="value">${fmtNum(state.totalTokensIn)} / ${fmtNum(state.totalTokensOut)}</div><div class="dim">since start, ≈ chars ÷ 4</div></div>
   <div class="card"><div class="label">VBL API</div><div class="value">${upBadge}</div><div class="dim">${esc(up.detail)} · ${esc(fmtAgo(up.checkedAt))}</div></div>
 </div>
 <section>
@@ -354,16 +383,37 @@ function dashboardHtml(store: Store, adminEnabled: boolean, up: NonNullable<type
 </html>`;
 }
 
-export function startHttp(port: number) {
-  const store = new Store(process.env.DATA_DIR ?? "./data");
-  store.importEnvKeys(parseApiKeys(process.env.MCP_API_KEYS));
+export interface AppOptions {
+  /** Where store.json lives. Defaults to $DATA_DIR or ./data. */
+  dataDir?: string;
+  /** Raw MCP_API_KEYS value ("label:key,label2:key2"). Defaults to the env var. */
+  apiKeys?: string;
+  /** Admin token; when absent the admin API and key UI stay disabled. */
+  adminToken?: string;
+}
+
+export interface AppHandle {
+  app: express.Express;
+  store: Store;
+  /** Closes live MCP sessions and flushes pending store writes. */
+  close(): Promise<void>;
+}
+
+/**
+ * Builds the Express app without binding a port, so tests can drive it on an
+ * ephemeral port (or via supertest) with isolated state. `startHttp` wraps it.
+ */
+export function createApp(options: AppOptions = {}): AppHandle {
+  const state = createState();
+  const store = new Store(options.dataDir ?? process.env.DATA_DIR ?? "./data");
+  store.importEnvKeys(parseApiKeys(options.apiKeys ?? process.env.MCP_API_KEYS));
 
   const app = express();
   app.set("trust proxy", true);
   app.use(express.json({ limit: "1mb" }));
 
   const requireApiKey = (req: Request, res: Response, next: NextFunction) => {
-    if (!store.hasKeys()) return next(); // open mode: no keys configured
+    if (!store.authEnabled()) return next(); // open mode: no key ever configured
     const key = req.header("x-api-key");
     const found = key ? store.findByKey(key) : undefined;
     if (found) {
@@ -378,7 +428,15 @@ export function startHttp(port: number) {
     });
   };
 
-  const adminToken = process.env.ADMIN_TOKEN;
+  /**
+   * A session belongs to the key that opened it. Without this check another
+   * key could drive someone else's session and its consumption would be
+   * metered against the wrong customer.
+   */
+  const ownsSession = (entry: SessionEntry, res: Response) =>
+    entry.info.keyId === ((res.locals.keyId as string) ?? null);
+
+  const adminToken = options.adminToken ?? process.env.ADMIN_TOKEN;
   const requireAdmin = (req: Request, res: Response, next: NextFunction) => {
     if (!adminToken) {
       res.status(403).json({ error: "Admin API disabled: set the ADMIN_TOKEN environment variable" });
@@ -404,31 +462,40 @@ export function startHttp(port: number) {
   });
 
   app.get("/health", async (_req, res) => {
-    const up = await checkUpstream();
+    const up = await checkUpstream(state);
     res.json({
       status: "ok",
       service: "vbl-mcp",
       version: VERSION,
       timestamp: new Date().toISOString(),
-      uptimeSeconds: Math.floor((Date.now() - startedAt.getTime()) / 1000),
-      activeSessions: sessions.size,
-      totalSessions,
-      totalToolCalls: totalCalls,
-      totalTokensIn,
-      totalTokensOut,
-      upstream: { url: BASE_URL, ...up, checkedAt: up.checkedAt.toISOString() },
+      uptimeSeconds: Math.floor((Date.now() - state.startedAt.getTime()) / 1000),
+      activeSessions: state.sessions.size,
+      totalSessions: state.totalSessions,
+      totalToolCalls: state.totalCalls,
+      totalTokensIn: state.totalTokensIn,
+      totalTokensOut: state.totalTokensOut,
+      upstream: { url: baseUrl(), ...up, checkedAt: up.checkedAt.toISOString() },
     });
   });
 
   app.get("/", async (_req, res) => {
-    const up = await checkUpstream();
-    res.type("html").send(dashboardHtml(store, Boolean(adminToken), up));
+    const up = await checkUpstream(state);
+    res.type("html").send(dashboardHtml(store, state, Boolean(adminToken), up));
   });
 
   app.post("/mcp", requireApiKey, async (req, res) => {
     try {
       const sessionId = req.header("mcp-session-id");
-      let entry = sessionId ? sessions.get(sessionId) : undefined;
+      let entry = sessionId ? state.sessions.get(sessionId) : undefined;
+
+      if (entry && !ownsSession(entry, res)) {
+        res.status(403).json({
+          jsonrpc: "2.0",
+          error: { code: -32003, message: "Forbidden: this session belongs to a different API key" },
+          id: null,
+        });
+        return;
+      }
 
       if (!entry) {
         if (sessionId || !isInitializeRequest(req.body)) {
@@ -457,8 +524,8 @@ export function startHttp(port: number) {
           sessionIdGenerator: () => randomUUID(),
           onsessioninitialized: (sid) => {
             info.id = sid;
-            sessions.set(sid, newEntry);
-            totalSessions++;
+            state.sessions.set(sid, newEntry);
+            state.totalSessions++;
           },
         });
         const mcp = createServer((rec) => {
@@ -466,14 +533,14 @@ export function startHttp(port: number) {
           info.tokensIn += rec.tokensIn;
           info.tokensOut += rec.tokensOut;
           info.lastSeenAt = new Date();
-          totalCalls++;
-          totalTokensIn += rec.tokensIn;
-          totalTokensOut += rec.tokensOut;
-          const t = (toolTotals[rec.tool] ??= { requests: 0, tokensIn: 0, tokensOut: 0 });
+          state.totalCalls++;
+          state.totalTokensIn += rec.tokensIn;
+          state.totalTokensOut += rec.tokensOut;
+          const t = (state.toolTotals[rec.tool] ??= { requests: 0, tokensIn: 0, tokensOut: 0 });
           t.requests++;
           t.tokensIn += rec.tokensIn;
           t.tokensOut += rec.tokensOut;
-          recentCalls.unshift({
+          state.recentCalls.unshift({
             time: new Date(),
             client: info.client,
             keyLabel: info.keyLabel,
@@ -483,12 +550,12 @@ export function startHttp(port: number) {
             durationMs: rec.durationMs,
             isError: rec.isError,
           });
-          if (recentCalls.length > MAX_RECENT) recentCalls.pop();
+          if (state.recentCalls.length > MAX_RECENT) state.recentCalls.pop();
           if (info.keyId) store.recordUsage(info.keyId, rec.tool, rec.tokensIn, rec.tokensOut, rec.isError);
         });
         const newEntry: SessionEntry = { transport, mcp, info };
         transport.onclose = () => {
-          if (transport.sessionId) endSession(transport.sessionId);
+          if (transport.sessionId) endSession(state, transport.sessionId);
         };
         await mcp.connect(transport);
         entry = newEntry;
@@ -518,9 +585,13 @@ export function startHttp(port: number) {
   // GET = SSE notification stream, DELETE = session termination.
   const handleSessionRequest = async (req: Request, res: Response) => {
     const sessionId = req.header("mcp-session-id");
-    const entry = sessionId ? sessions.get(sessionId) : undefined;
+    const entry = sessionId ? state.sessions.get(sessionId) : undefined;
     if (!entry) {
       res.status(400).send("Invalid or missing mcp-session-id header");
+      return;
+    }
+    if (!ownsSession(entry, res)) {
+      res.status(403).send("This session belongs to a different API key");
       return;
     }
     entry.info.lastSeenAt = new Date();
@@ -529,9 +600,24 @@ export function startHttp(port: number) {
   app.get("/mcp", requireApiKey, handleSessionRequest);
   app.delete("/mcp", requireApiKey, handleSessionRequest);
 
+  return {
+    app,
+    store,
+    async close() {
+      for (const entry of [...state.sessions.values()]) {
+        await entry.transport.close().catch(() => {});
+      }
+      store.saveNow();
+    },
+  };
+}
+
+export function startHttp(port: number) {
+  const { app, store, close } = createApp();
+  const adminEnabled = Boolean(process.env.ADMIN_TOKEN);
+
   process.on("SIGTERM", () => {
-    store.saveNow();
-    process.exit(0);
+    void close().finally(() => process.exit(0));
   });
 
   app.listen(port, () => {
@@ -539,7 +625,13 @@ export function startHttp(port: number) {
     console.log(`  MCP endpoint:  POST /mcp`);
     console.log(`  Status page:   GET /`);
     console.log(`  Health check:  GET /health`);
-    console.log(`  Admin API:     ${adminToken ? "/admin/keys (X-Admin-Token)" : "disabled (set ADMIN_TOKEN)"}`);
-    console.log(store.hasKeys() ? "  Auth: X-API-Key required on /mcp" : "  Auth: OPEN — no API keys configured yet");
+    console.log(`  Admin API:     ${adminEnabled ? "/admin/keys (X-Admin-Token)" : "disabled (set ADMIN_TOKEN)"}`);
+    console.log(
+      !store.authEnabled()
+        ? "  Auth: OPEN — no API keys configured yet"
+        : store.hasActiveKeys()
+          ? "  Auth: X-API-Key required on /mcp"
+          : "  Auth: X-API-Key required on /mcp — WARNING: every key is revoked, no client can connect"
+    );
   });
 }

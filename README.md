@@ -37,6 +37,13 @@ Official API documentation: [ApiDocV2.pdf](docs/ApiDocV2.pdf) ([source](https://
 
 ## Local development
 
+The project is developed test-first — see the [testing & TDD guide](docs/TESTING.md) for the workflow and the test harness (fake VBL upstream, in-memory MCP client, isolated HTTP app).
+
+```bash
+npm run test:watch   # red-green-refactor loop
+npm run check        # typecheck + full suite, same as CI
+```
+
 ```bash
 git clone https://github.com/jmolinasoler/vbl_mcp.git
 cd vbl_mcp
