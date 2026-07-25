@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, afterEach } from "vitest";
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { withTempStore, type TempStore } from "../harness/index.js";
 
 describe("Store: API key lifecycle", () => {
@@ -164,6 +164,65 @@ describe("Store: persistence", () => {
     const key = tmp.store.createKey("billing");
     tmp.store.revokeKey(key.id);
     expect(tmp.reopen().findByKey(key.key)).toBeUndefined();
+  });
+});
+
+describe("Store: deferred writes", () => {
+  afterEach(() => vi.useRealTimers());
+
+  it("survives the data directory vanishing before a deferred write lands", () => {
+    // A background flush must never throw from a timer: an unhandled
+    // exception there takes the whole server down (e.g. volume unmounted).
+    vi.useFakeTimers();
+    const logged = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      const tmp = withTempStore();
+      const key = tmp.store.createKey("billing");
+      tmp.store.recordUsage(key.id, "list_clubs", 1, 1, false); // schedules a save
+      tmp.cleanup(); // directory disappears before the timer fires
+
+      expect(() => vi.advanceTimersByTime(10_000)).not.toThrow();
+      // Failing silently would hide data loss, so it must be reported.
+      expect(logged).toHaveBeenCalled();
+    } finally {
+      logged.mockRestore();
+    }
+  });
+
+  it("stops writing once closed", () => {
+    vi.useFakeTimers();
+    const tmp = withTempStore();
+    try {
+      const key = tmp.store.createKey("billing");
+      tmp.store.recordUsage(key.id, "list_clubs", 1, 1, false);
+      tmp.store.close();
+      // Nothing is left pending that could fire after teardown.
+      expect(vi.getTimerCount()).toBe(0);
+    } finally {
+      tmp.cleanup();
+    }
+  });
+
+  it("still persists pending usage when closed", () => {
+    const tmp = withTempStore();
+    try {
+      const key = tmp.store.createKey("billing");
+      tmp.store.recordUsage(key.id, "get_club", 3, 400, false);
+      tmp.store.close();
+
+      const reopened = tmp.reopen();
+      expect(reopened.listKeys()[0].usage.tokensOut).toBe(400);
+    } finally {
+      tmp.cleanup();
+    }
+  });
+
+  it("reports a failed explicit save to the caller", () => {
+    const tmp = withTempStore();
+    tmp.store.createKey("billing");
+    tmp.cleanup();
+    // An admin creating a key must not be told it worked if it did not.
+    expect(() => tmp.store.saveNow()).toThrow();
   });
 });
 

@@ -849,7 +849,7 @@ export function createApp(options: AppOptions = {}): AppHandle {
       for (const entry of [...state.sessions.values()]) {
         await entry.transport.close().catch(() => {});
       }
-      store.saveNow();
+      store.close();
     },
   };
 }

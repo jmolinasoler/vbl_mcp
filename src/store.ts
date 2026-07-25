@@ -98,14 +98,41 @@ export class Store {
     if (this.saveTimer) return;
     this.saveTimer = setTimeout(() => {
       this.saveTimer = null;
-      this.saveNow();
+      // A background flush must never throw: this runs from a timer, where an
+      // exception is unhandled and would take the whole process down (a full
+      // disk or an unmounted volume must not kill the MCP server).
+      try {
+        this.write();
+      } catch (e) {
+        console.error("vbl-mcp: failed to persist store:", e);
+      }
     }, 2000);
+    // Do not hold the event loop open just for a pending write.
+    this.saveTimer.unref?.();
   }
 
-  saveNow() {
+  private write() {
     const tmp = `${this.file}.tmp`;
     writeFileSync(tmp, JSON.stringify(this.data, null, 2));
     renameSync(tmp, this.file);
+  }
+
+  /** Writes immediately. Throws if it cannot, so callers can report failure. */
+  saveNow() {
+    if (this.saveTimer) {
+      clearTimeout(this.saveTimer);
+      this.saveTimer = null;
+    }
+    this.write();
+  }
+
+  /** Flushes anything pending and cancels deferred writes. */
+  close() {
+    try {
+      this.saveNow();
+    } catch (e) {
+      console.error("vbl-mcp: failed to persist store on shutdown:", e);
+    }
   }
 
   /**
