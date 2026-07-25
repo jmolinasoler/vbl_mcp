@@ -24,10 +24,13 @@ services:
       # points it at port 3000 of this service.
       - SERVICE_FQDN_VBLMCP_3000
       - PORT=3000
-      # Recommended: enables the key-management panel on the dashboard and
-      # the /admin/keys API. Create per-client API keys from there; clients
-      # then call /mcp with an X-API-Key header. Define the value in
-      # Coolify → Environment Variables.
+      # Recommended: dashboard account, created on first start. Without it
+      # the status page (client IPs, usage) stays public. Signing in also
+      # authorizes the /admin/keys API used by the key-management panel.
+      # Define the values in Coolify → Environment Variables.
+      # - ADMIN_USERNAME=${ADMIN_USERNAME}
+      # - ADMIN_PASSWORD=${ADMIN_PASSWORD}
+      # Optional: extra token for scripts calling /admin/* without a session.
       # - ADMIN_TOKEN=${ADMIN_TOKEN}
       # Optional: seed API keys ("hermes:key1,claude:key2").
       # - MCP_API_KEYS=${MCP_API_KEYS}

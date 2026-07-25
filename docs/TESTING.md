@@ -37,8 +37,13 @@ Two rules that keep the suite trustworthy:
 
 | Layer | Location | Use it for |
 |---|---|---|
-| Unit | `tests/unit/` | Pure logic and single modules: the store, token estimation, tool payload shaping |
-| Integration | `tests/integration/` | The real Express app over real HTTP with a real MCP client: auth, admin API, metering end to end, persistence |
+| Unit | `tests/unit/` | Pure logic and single modules: the store, password hashing, token estimation, tool payload shaping |
+| Integration | `tests/integration/` | The real Express app over real HTTP with a real MCP client: login, admin API, metering end to end, persistence |
+
+For login tests, `startHttpHarness({ adminUsername, adminPassword })` seeds the
+account, `h.login(user, pass)` returns a Cookie header to replay, and
+`h.postLogin(...)` gives you the raw response when you need to assert on the
+status code or the `Set-Cookie` attributes.
 
 Anything that would reach `vblcb.wisseq.eu` goes through the fake upstream.
 `tests/setup.ts` points `VBL_BASE_URL` at a dead address by default, so a test
@@ -132,6 +137,14 @@ or security relevant:
 2. **One key could drive a session opened by another**, and the consumption was
    metered against the key that opened it. A session is now bound to its key and
    mismatches get 403.
+
+## When a test passes on the first run
+
+It happens, especially for a feature written in one sitting. A test you never
+saw fail has not been shown to detect anything, so prove it does: break the
+code on purpose (invert the guard, make the check always succeed), watch the
+suite go red, then restore. The login suite was verified this way — disabling
+the dashboard guard turns 5 tests red, accepting any password turns 4 red.
 
 ## Adding a tool, test-first
 

@@ -1,13 +1,16 @@
 /**
- * JSON-file-backed store for API keys and their usage metering.
+ * JSON-file-backed store for dashboard users, their login sessions, API keys
+ * and usage metering.
  *
- * Single-tenant: one flat list of keys, no owners. Usage is aggregated per
- * key (requests, estimated tokens in/out, per-tool breakdown) so it can later
- * be turned into a bill. Writes are debounced and atomic (tmp + rename).
+ * Single-tenant: one flat list of users and keys, no owners. Usage is
+ * aggregated per key (requests, estimated tokens in/out, per-tool breakdown)
+ * so it can later be turned into a bill. Writes are debounced and atomic
+ * (tmp + rename).
  */
 import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { randomBytes } from "node:crypto";
 import { join } from "node:path";
+import { newSessionId, type PasswordHash } from "./auth.js";
 
 export interface ToolUsage {
   requests: number;
@@ -36,6 +39,29 @@ export interface ApiKeyPublic extends Omit<ApiKey, "key"> {
   keyPreview: string;
 }
 
+export interface User {
+  id: string;
+  /** Stored lowercased; lookups are case-insensitive. */
+  username: string;
+  passwordHash: string;
+  salt: string;
+  source: "env" | "admin";
+  createdAt: string;
+  lastLoginAt?: string;
+}
+
+/** User without any password material — the only shape that leaves the store. */
+export type UserPublic = Omit<User, "passwordHash" | "salt">;
+
+export interface LoginSession {
+  id: string;
+  userId: string;
+  createdAt: string;
+  expiresAt: string;
+  ip: string;
+  userAgent: string;
+}
+
 const emptyUsage = (): KeyUsage => ({
   requests: 0,
   tokensIn: 0,
@@ -44,19 +70,27 @@ const emptyUsage = (): KeyUsage => ({
   byTool: {},
 });
 
+interface StoreData {
+  keys: ApiKey[];
+  users: User[];
+  sessions: LoginSession[];
+}
+
 export class Store {
   private file: string;
-  private data: { keys: ApiKey[] };
+  private data: StoreData;
   private saveTimer: NodeJS.Timeout | null = null;
 
   constructor(dataDir: string) {
     mkdirSync(dataDir, { recursive: true });
     this.file = join(dataDir, "store.json");
     if (existsSync(this.file)) {
-      this.data = JSON.parse(readFileSync(this.file, "utf8"));
+      const loaded = JSON.parse(readFileSync(this.file, "utf8"));
+      // Files written before users/sessions existed lack those arrays.
+      this.data = { keys: [], users: [], sessions: [], ...loaded };
       for (const k of this.data.keys) k.usage = { ...emptyUsage(), ...k.usage };
     } else {
-      this.data = { keys: [] };
+      this.data = { keys: [], users: [], sessions: [] };
     }
   }
 
@@ -146,6 +180,108 @@ export class Store {
       // Short (env-provided) keys would leak through a prefix+suffix preview.
       keyPreview: key.length > 16 ? `${key.slice(0, 8)}…${key.slice(-4)}` : `${key.slice(0, 3)}…`,
     }));
+  }
+
+  // ---- Dashboard users ----
+
+  createUser(username: string, credentials: PasswordHash, source: User["source"]): User {
+    const name = username.trim().toLowerCase();
+    if (!name) throw new Error("Username must not be empty");
+    if (this.findUser(name)) throw new Error(`User "${name}" already exists`);
+    const user: User = {
+      id: randomBytes(4).toString("hex"),
+      username: name,
+      passwordHash: credentials.hash,
+      salt: credentials.salt,
+      source,
+      createdAt: new Date().toISOString(),
+    };
+    this.data.users.push(user);
+    this.saveNow();
+    return user;
+  }
+
+  findUser(username: string): User | undefined {
+    const name = username.trim().toLowerCase();
+    return this.data.users.find((u) => u.username === name);
+  }
+
+  findUserById(id: string): User | undefined {
+    return this.data.users.find((u) => u.id === id);
+  }
+
+  listUsers(): UserPublic[] {
+    return this.data.users.map(({ passwordHash, salt, ...rest }) => rest);
+  }
+
+  hasUsers(): boolean {
+    return this.data.users.length > 0;
+  }
+
+  setPassword(id: string, credentials: PasswordHash): boolean {
+    const user = this.findUserById(id);
+    if (!user) return false;
+    user.passwordHash = credentials.hash;
+    user.salt = credentials.salt;
+    this.saveNow();
+    return true;
+  }
+
+  touchLogin(id: string) {
+    const user = this.findUserById(id);
+    if (!user) return;
+    user.lastLoginAt = new Date().toISOString();
+    this.scheduleSave();
+  }
+
+  deleteUser(id: string): boolean {
+    const before = this.data.users.length;
+    this.data.users = this.data.users.filter((u) => u.id !== id);
+    if (this.data.users.length === before) return false;
+    this.deleteUserSessions(id);
+    this.saveNow();
+    return true;
+  }
+
+  // ---- Login sessions ----
+
+  createSession(userId: string, ttlMs: number, ip: string, userAgent: string): LoginSession {
+    const session: LoginSession = {
+      id: newSessionId(),
+      userId,
+      createdAt: new Date().toISOString(),
+      expiresAt: new Date(Date.now() + ttlMs).toISOString(),
+      ip,
+      userAgent,
+    };
+    this.data.sessions.push(session);
+    this.saveNow();
+    return session;
+  }
+
+  getSession(id: string): LoginSession | undefined {
+    const session = this.data.sessions.find((s) => s.id === id);
+    if (!session) return undefined;
+    if (Date.parse(session.expiresAt) <= Date.now()) {
+      this.deleteSession(id);
+      return undefined;
+    }
+    return session;
+  }
+
+  deleteSession(id: string) {
+    this.data.sessions = this.data.sessions.filter((s) => s.id !== id);
+    this.scheduleSave();
+  }
+
+  /** Used on password change, so other browsers are signed out. */
+  deleteUserSessions(userId: string) {
+    this.data.sessions = this.data.sessions.filter((s) => s.userId !== userId);
+    this.scheduleSave();
+  }
+
+  listSessions(): LoginSession[] {
+    return this.data.sessions.filter((s) => Date.parse(s.expiresAt) > Date.now());
   }
 
   recordUsage(id: string, tool: string, tokensIn: number, tokensOut: number, isError: boolean) {

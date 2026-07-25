@@ -17,7 +17,8 @@ import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/
 import { isInitializeRequest } from "@modelcontextprotocol/sdk/types.js";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { createServer, baseUrl, VERSION } from "./vbl.js";
-import { Store } from "./store.js";
+import { Store, type User } from "./store.js";
+import { hashPassword, parseCookies, safeNextPath, verifyPassword } from "./auth.js";
 
 interface SessionInfo {
   id: string;
@@ -168,11 +169,65 @@ function fmtUptime(startedAt: Date): string {
   return d ? `${d}d ${h}h ${m}m` : h ? `${h}h ${m}m` : `${m}m ${s % 60}s`;
 }
 
+/** Shared page chrome, so the login page matches the dashboard. */
+const PAGE_STYLE = `
+  :root { color-scheme: light dark; }
+  body { font-family: system-ui, sans-serif; margin: 0; padding: 2rem; background: #f5f5f4; color: #1c1917; }
+  @media (prefers-color-scheme: dark) { body { background: #1c1917; color: #e7e5e4; } .card, .panel { background: #292524 !important; } th { color: #a8a29e !important; } input { background:#1c1917; color:#e7e5e4; border-color:#57534e; } }
+  h1 { margin: 0 0 .25rem; font-size: 1.5rem; }
+  h1 .v { font-weight: normal; color: #ea580c; }
+  .sub { color: #78716c; margin-bottom: 1.5rem; }
+  input { padding: .4rem .6rem; border: 1px solid #d6d3d1; border-radius: .375rem; font: inherit; }
+  button { padding: .4rem .85rem; border: 0; border-radius: .375rem; background: #ea580c; color: #fff; font-weight: 600; cursor: pointer; font: inherit; font-weight: 600; }
+  button.secondary { background: #57534e; }
+  button.revoke { background: #dc2626; padding: .2rem .5rem; font-size: .75rem; }
+  .error { background: #fee2e2; color: #991b1b; padding: .5rem .75rem; border-radius: .375rem; margin-bottom: 1rem; font-size: .875rem; }
+  .warn { background: #fef3c7; color: #92400e; padding: .6rem .85rem; border-radius: .375rem; margin-bottom: 1.5rem; font-size: .875rem; }
+  code { font-size: .9em; }
+`;
+
+function loginHtml(next: string, error?: string): string {
+  return `<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Sign in · vbl-mcp</title>
+<style>
+${PAGE_STYLE}
+  body { display: flex; align-items: center; justify-content: center; min-height: 100vh; box-sizing: border-box; }
+  .panel { background: #fff; border-radius: .5rem; padding: 2rem; box-shadow: 0 1px 3px rgba(0,0,0,.1); width: min(22rem, 100%); }
+  label { display: block; font-size: .8rem; text-transform: uppercase; letter-spacing: .04em; color: #78716c; margin-bottom: .25rem; }
+  .field { margin-bottom: 1rem; }
+  .field input { width: 100%; box-sizing: border-box; }
+  button { width: 100%; padding: .55rem; }
+</style>
+</head>
+<body>
+<form class="panel" method="post" action="/login">
+  <h1>🏀 vbl-mcp</h1>
+  <div class="sub">Sign in to the status dashboard</div>
+  ${error ? `<div class="error">${esc(error)}</div>` : ""}
+  <input type="hidden" name="next" value="${esc(next)}">
+  <div class="field">
+    <label for="username">Username</label>
+    <input id="username" name="username" autocomplete="username" autofocus required>
+  </div>
+  <div class="field">
+    <label for="password">Password</label>
+    <input id="password" name="password" type="password" autocomplete="current-password" required>
+  </div>
+  <button type="submit">Sign in</button>
+</form>
+</body>
+</html>`;
+}
+
 function dashboardHtml(
   store: Store,
   state: AppState,
-  adminEnabled: boolean,
-  up: UpstreamStatus
+  up: UpstreamStatus,
+  user: User | undefined
 ): string {
   const { startedAt, sessions, endedSessions, toolTotals, recentCalls } = state;
   const sessionRows = [...sessions.values()]
@@ -245,14 +300,25 @@ function dashboardHtml(
     up.status === "ok"
       ? `<span class="badge ok">reachable</span>`
       : `<span class="badge err">unreachable</span>`;
-  const adminSection = adminEnabled
+  const signedIn = Boolean(user);
+  const adminSection = signedIn
     ? `<div class="adminbar">
-        <label>Admin token <input id="adm" type="password" placeholder="X-Admin-Token"></label>
         <label>New key label <input id="lbl" placeholder="e.g. hermes"></label>
         <button id="mk">Create API key</button>
         <span id="keymsg"></span>
       </div>`
-    : `<div class="dim">Key management is disabled — set the <code>ADMIN_TOKEN</code> environment variable to enable it.</div>`;
+    : `<div class="dim">Sign in to create or revoke API keys.</div>`;
+  const userBar = user
+    ? `<div class="userbar">
+        Signed in as <strong>${esc(user.username)}</strong>
+        <button id="pw" class="secondary">Change password</button>
+        <form method="post" action="/logout" style="display:inline"><button class="secondary" type="submit">Log out</button></form>
+      </div>`
+    : "";
+  const noUserWarning = store.hasUsers()
+    ? ""
+    : `<div class="warn"><strong>This dashboard is public.</strong> It exposes client IPs and usage.
+        Set <code>ADMIN_USERNAME</code> and <code>ADMIN_PASSWORD</code> and restart to require a login.</div>`;
   return `<!doctype html>
 <html lang="en">
 <head>
@@ -260,12 +326,8 @@ function dashboardHtml(
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>vbl-mcp status</title>
 <style>
-  :root { color-scheme: light dark; }
-  body { font-family: system-ui, sans-serif; margin: 0; padding: 2rem; background: #f5f5f4; color: #1c1917; }
-  @media (prefers-color-scheme: dark) { body { background: #1c1917; color: #e7e5e4; } .card { background: #292524 !important; } th { color: #a8a29e !important; } input { background:#1c1917; color:#e7e5e4; border-color:#57534e; } }
-  h1 { margin: 0 0 .25rem; font-size: 1.5rem; }
-  h1 .v { font-weight: normal; color: #ea580c; }
-  .sub { color: #78716c; margin-bottom: 1.5rem; }
+${PAGE_STYLE}
+  .userbar { display: flex; align-items: center; gap: .5rem; justify-content: flex-end; font-size: .875rem; margin-bottom: .5rem; }
   .cards { display: flex; flex-wrap: wrap; gap: 1rem; margin-bottom: 1.5rem; }
   .card { background: #fff; border-radius: .5rem; padding: 1rem 1.25rem; min-width: 10rem; box-shadow: 0 1px 3px rgba(0,0,0,.1); }
   .card .label { font-size: .75rem; text-transform: uppercase; letter-spacing: .05em; color: #78716c; }
@@ -285,18 +347,16 @@ function dashboardHtml(
   .dim { color: #a8a29e; font-size: .8em; }
   .empty { color: #a8a29e; font-style: italic; }
   .adminbar { display: flex; flex-wrap: wrap; gap: .75rem; align-items: center; margin-bottom: .75rem; font-size: .875rem; }
-  .adminbar input { padding: .3rem .5rem; border: 1px solid #d6d3d1; border-radius: .375rem; }
-  button { padding: .35rem .75rem; border: 0; border-radius: .375rem; background: #ea580c; color: #fff; font-weight: 600; cursor: pointer; }
-  button.revoke { background: #dc2626; padding: .2rem .5rem; font-size: .75rem; }
   #keymsg { font-size: .875rem; }
   #keymsg code { background: rgba(234,88,12,.12); padding: .15rem .4rem; border-radius: .25rem; user-select: all; }
   footer { color: #a8a29e; font-size: .8rem; margin-top: 2rem; }
-  code { font-size: .9em; }
 </style>
 </head>
 <body>
+${userBar}
 <h1>🏀 vbl-mcp <span class="v">v${esc(VERSION)}</span></h1>
 <div class="sub">MCP server for the Basketball Vlaanderen API — endpoint <code>/mcp</code>, health <code>/health</code></div>
+${noUserWarning}
 <div class="cards">
   <div class="card"><div class="label">Uptime</div><div class="value">${esc(fmtUptime(startedAt))}</div></div>
   <div class="card"><div class="label">Active sessions</div><div class="value">${sessions.size}</div></div>
@@ -310,7 +370,7 @@ function dashboardHtml(
   ${adminSection}
   ${keyRows
     ? `<table><thead><tr><th>ID</th><th>Label</th><th>Key</th><th>Created</th><th>Status / last used</th><th>Requests</th><th>Errors</th><th>Tokens in</th><th>Tokens out</th><th></th></tr></thead><tbody>${keyRows}</tbody></table>`
-    : `<div class="empty">No API keys yet${adminEnabled ? " — create one above" : ""}. Without keys, /mcp is open.</div>`}
+    : `<div class="empty">No API keys yet${signedIn ? " — create one above" : ""}. Without keys, /mcp is open.</div>`}
 </section>
 <section>
   <h2>Active sessions (who is connected now)</h2>
@@ -339,15 +399,12 @@ function dashboardHtml(
 <footer>Started ${esc(startedAt.toISOString())} · session/tool tables reset on restart, key usage is persisted · auto-refreshes every 15s (paused while a new key is shown)</footer>
 <script>
 (function () {
-  var adm = document.getElementById("adm");
-  if (adm) {
-    adm.value = localStorage.getItem("vblAdminToken") || "";
-    adm.addEventListener("change", function () { localStorage.setItem("vblAdminToken", adm.value); });
-  }
+  // Admin calls are authorized by the login session cookie.
   function call(method, path, body) {
     return fetch(path, {
       method: method,
-      headers: { "content-type": "application/json", "x-admin-token": adm ? adm.value : "" },
+      credentials: "same-origin",
+      headers: { "content-type": "application/json" },
       body: body ? JSON.stringify(body) : undefined,
     }).then(function (r) {
       return r.json().catch(function () { return {}; }).then(function (j) {
@@ -364,6 +421,16 @@ function dashboardHtml(
         msg.innerHTML = "Created — copy it now, it is shown only once: <code>" + j.key + "</code>";
       })
       .catch(function (e) { msg.textContent = "Error: " + e.message; });
+  });
+  var pw = document.getElementById("pw");
+  if (pw) pw.addEventListener("click", function () {
+    var currentPassword = prompt("Current password:");
+    if (!currentPassword) return;
+    var newPassword = prompt("New password (at least 8 characters):");
+    if (!newPassword) return;
+    call("POST", "/account/password", { currentPassword: currentPassword, newPassword: newPassword })
+      .then(function (j) { alert(j.message || "Password changed."); location.href = "/login"; })
+      .catch(function (e) { alert("Error: " + e.message); });
   });
   document.querySelectorAll("button.revoke").forEach(function (b) {
     b.addEventListener("click", function () {
@@ -388,16 +455,30 @@ export interface AppOptions {
   dataDir?: string;
   /** Raw MCP_API_KEYS value ("label:key,label2:key2"). Defaults to the env var. */
   apiKeys?: string;
-  /** Admin token; when absent the admin API and key UI stay disabled. */
+  /** Admin token for programmatic access; a login session works too. */
   adminToken?: string;
+  /** Dashboard account seeded on first start. Defaults to $ADMIN_USERNAME. */
+  adminUsername?: string;
+  /** Password for the seeded account. Defaults to $ADMIN_PASSWORD. */
+  adminPassword?: string;
+  /** Login session lifetime. Defaults to $SESSION_TTL_HOURS or 7 days. */
+  sessionTtlMs?: number;
 }
 
 export interface AppHandle {
   app: express.Express;
   store: Store;
+  /** Resolves once the first-run user seeding has finished. */
+  ready: Promise<void>;
   /** Closes live MCP sessions and flushes pending store writes. */
   close(): Promise<void>;
 }
+
+const SESSION_COOKIE = "vbl_session";
+const MIN_PASSWORD_LENGTH = 8;
+/** Failed logins allowed per username+IP before a temporary lockout. */
+const LOGIN_MAX_ATTEMPTS = 10;
+const LOGIN_LOCKOUT_MS = 15 * 60_000;
 
 /**
  * Builds the Express app without binding a port, so tests can drive it on an
@@ -408,9 +489,27 @@ export function createApp(options: AppOptions = {}): AppHandle {
   const store = new Store(options.dataDir ?? process.env.DATA_DIR ?? "./data");
   store.importEnvKeys(parseApiKeys(options.apiKeys ?? process.env.MCP_API_KEYS));
 
+  const sessionTtlMs =
+    options.sessionTtlMs ??
+    (process.env.SESSION_TTL_HOURS ? Number(process.env.SESSION_TTL_HOURS) * 3_600_000 : 7 * 24 * 3_600_000);
+
+  /**
+   * First-run bootstrap: create the dashboard account from the environment.
+   * Only ever creates a user that does not exist — restarts must not reset a
+   * password the operator changed from the UI.
+   */
+  const ready = (async () => {
+    const username = options.adminUsername ?? process.env.ADMIN_USERNAME;
+    const password = options.adminPassword ?? process.env.ADMIN_PASSWORD;
+    if (!username || !password) return;
+    if (store.findUser(username)) return;
+    store.createUser(username, await hashPassword(password), "env");
+  })();
+
   const app = express();
   app.set("trust proxy", true);
   app.use(express.json({ limit: "1mb" }));
+  app.use(express.urlencoded({ extended: false, limit: "64kb" }));
 
   const requireApiKey = (req: Request, res: Response, next: NextFunction) => {
     if (!store.authEnabled()) return next(); // open mode: no key ever configured
@@ -437,14 +536,156 @@ export function createApp(options: AppOptions = {}): AppHandle {
     entry.info.keyId === ((res.locals.keyId as string) ?? null);
 
   const adminToken = options.adminToken ?? process.env.ADMIN_TOKEN;
+
+  /** Resolves the signed-in user from the session cookie, if any. */
+  const currentUser = (req: Request): User | undefined => {
+    const sessionId = parseCookies(req.header("cookie"))[SESSION_COOKIE];
+    if (!sessionId) return undefined;
+    const session = store.getSession(sessionId);
+    return session ? store.findUserById(session.userId) : undefined;
+  };
+
+  const setSessionCookie = (req: Request, res: Response, id: string, maxAgeMs: number) => {
+    const attrs = [
+      `${SESSION_COOKIE}=${id}`,
+      "Path=/",
+      "HttpOnly",
+      // Strict also serves as the CSRF defence for the admin endpoints, which
+      // are otherwise authorized by this cookie alone.
+      "SameSite=Strict",
+      `Max-Age=${Math.max(0, Math.floor(maxAgeMs / 1000))}`,
+    ];
+    if (req.secure) attrs.push("Secure");
+    res.setHeader("Set-Cookie", attrs.join("; "));
+  };
+
+  const clearSessionCookie = (res: Response) =>
+    res.setHeader("Set-Cookie", `${SESSION_COOKIE}=; Path=/; HttpOnly; SameSite=Strict; Max-Age=0`);
+
+  /**
+   * Dashboard guard. When no user has been configured the dashboard stays
+   * reachable (so upgrading an existing deployment does not lock the operator
+   * out) but the page itself carries a warning to set ADMIN_USERNAME.
+   */
+  const requireLogin = (req: Request, res: Response, next: NextFunction) => {
+    if (!store.hasUsers()) return next();
+    if (currentUser(req)) return next();
+    res.redirect(302, `/login?next=${encodeURIComponent(req.originalUrl)}`);
+  };
+
+  /** Admin API: a logged-in session or the admin token both authorize. */
   const requireAdmin = (req: Request, res: Response, next: NextFunction) => {
-    if (!adminToken) {
-      res.status(403).json({ error: "Admin API disabled: set the ADMIN_TOKEN environment variable" });
+    if (currentUser(req)) return next();
+    if (adminToken && req.header("x-admin-token") === adminToken) return next();
+    if (!adminToken && !store.hasUsers()) {
+      res.status(403).json({
+        error: "Admin API disabled: set ADMIN_USERNAME/ADMIN_PASSWORD to sign in, or ADMIN_TOKEN for scripts",
+      });
       return;
     }
-    if (req.header("x-admin-token") === adminToken) return next();
-    res.status(401).json({ error: "Unauthorized: missing or invalid X-Admin-Token header" });
+    res.status(401).json({ error: "Unauthorized: sign in, or send a valid X-Admin-Token header" });
   };
+
+  // ---- Login ----
+
+  const loginAttempts = new Map<string, { count: number; until: number }>();
+  const attemptKey = (username: string, req: Request) => `${username.toLowerCase()}@${clientIp(req)}`;
+
+  const isLockedOut = (key: string) => {
+    const entry = loginAttempts.get(key);
+    if (!entry) return false;
+    if (Date.now() > entry.until) {
+      loginAttempts.delete(key);
+      return false;
+    }
+    return entry.count >= LOGIN_MAX_ATTEMPTS;
+  };
+
+  const registerFailure = (key: string) => {
+    const entry = loginAttempts.get(key) ?? { count: 0, until: 0 };
+    entry.count++;
+    entry.until = Date.now() + LOGIN_LOCKOUT_MS;
+    loginAttempts.set(key, entry);
+  };
+
+  app.get("/login", (req, res) => {
+    if (currentUser(req)) {
+      res.redirect(302, safeNextPath(String(req.query.next ?? "/")));
+      return;
+    }
+    res.type("html").send(loginHtml(safeNextPath(String(req.query.next ?? "/"))));
+  });
+
+  app.post("/login", async (req, res) => {
+    const username = String(req.body?.username ?? "").trim();
+    const password = String(req.body?.password ?? "");
+    const next = safeNextPath(req.body?.next);
+    const wantsJson = (req.header("accept") ?? "").includes("application/json");
+
+    const fail = (status: number, message: string) => {
+      if (wantsJson) res.status(status).json({ error: message });
+      else res.status(status).type("html").send(loginHtml(next, message));
+    };
+
+    const key = attemptKey(username, req);
+    if (isLockedOut(key)) {
+      fail(429, "Too many failed attempts. Try again later.");
+      return;
+    }
+
+    const user = username ? store.findUser(username) : undefined;
+    const ok = user ? await verifyPassword(password, user.passwordHash, user.salt) : false;
+    if (!user || !ok) {
+      registerFailure(key);
+      // Same message either way: the form must not reveal which users exist.
+      fail(401, "Invalid username or password.");
+      return;
+    }
+
+    loginAttempts.delete(key);
+    const session = store.createSession(
+      user.id,
+      sessionTtlMs,
+      clientIp(req),
+      req.header("user-agent") ?? ""
+    );
+    store.touchLogin(user.id);
+    setSessionCookie(req, res, session.id, sessionTtlMs);
+    if (wantsJson) res.status(200).json({ ok: true, next });
+    else res.redirect(302, next);
+  });
+
+  app.post("/logout", (req, res) => {
+    const sessionId = parseCookies(req.header("cookie"))[SESSION_COOKIE];
+    if (sessionId) store.deleteSession(sessionId);
+    clearSessionCookie(res);
+    if ((req.header("accept") ?? "").includes("application/json")) res.json({ ok: true });
+    else res.redirect(302, "/login");
+  });
+
+  app.post("/account/password", async (req, res) => {
+    const user = currentUser(req);
+    if (!user) {
+      res.status(401).json({ error: "Unauthorized: sign in first" });
+      return;
+    }
+    const currentPassword = String(req.body?.currentPassword ?? "");
+    const newPassword = String(req.body?.newPassword ?? "");
+    if (newPassword.length < MIN_PASSWORD_LENGTH) {
+      res.status(400).json({ error: `New password must be at least ${MIN_PASSWORD_LENGTH} characters` });
+      return;
+    }
+    if (!(await verifyPassword(currentPassword, user.passwordHash, user.salt))) {
+      res.status(401).json({ error: "Current password is incorrect" });
+      return;
+    }
+    store.setPassword(user.id, await hashPassword(newPassword));
+    // Sign every browser out, including this one: a password change should
+    // end any session an attacker might already hold.
+    store.deleteUserSessions(user.id);
+    clearSessionCookie(res);
+    res.json({ ok: true, message: "Password changed. Please sign in again." });
+  });
 
   // ---- Admin API (key management + usage export) ----
   app.get("/admin/keys", requireAdmin, (_req, res) => {
@@ -478,9 +719,9 @@ export function createApp(options: AppOptions = {}): AppHandle {
     });
   });
 
-  app.get("/", async (_req, res) => {
+  app.get("/", requireLogin, async (req, res) => {
     const up = await checkUpstream(state);
-    res.type("html").send(dashboardHtml(store, state, Boolean(adminToken), up));
+    res.type("html").send(dashboardHtml(store, state, up, currentUser(req)));
   });
 
   app.post("/mcp", requireApiKey, async (req, res) => {
@@ -603,6 +844,7 @@ export function createApp(options: AppOptions = {}): AppHandle {
   return {
     app,
     store,
+    ready,
     async close() {
       for (const entry of [...state.sessions.values()]) {
         await entry.transport.close().catch(() => {});
@@ -612,8 +854,9 @@ export function createApp(options: AppOptions = {}): AppHandle {
   };
 }
 
-export function startHttp(port: number) {
-  const { app, store, close } = createApp();
+export async function startHttp(port: number) {
+  const { app, store, ready, close } = createApp();
+  await ready; // seed the dashboard account before accepting traffic
   const adminEnabled = Boolean(process.env.ADMIN_TOKEN);
 
   process.on("SIGTERM", () => {
@@ -625,7 +868,12 @@ export function startHttp(port: number) {
     console.log(`  MCP endpoint:  POST /mcp`);
     console.log(`  Status page:   GET /`);
     console.log(`  Health check:  GET /health`);
-    console.log(`  Admin API:     ${adminEnabled ? "/admin/keys (X-Admin-Token)" : "disabled (set ADMIN_TOKEN)"}`);
+    console.log(
+      store.hasUsers()
+        ? "  Dashboard:     login required"
+        : "  Dashboard:     PUBLIC — set ADMIN_USERNAME and ADMIN_PASSWORD to require a login"
+    );
+    console.log(`  Admin API:     ${adminEnabled ? "session or X-Admin-Token" : "session only (no ADMIN_TOKEN set)"}`);
     console.log(
       !store.authEnabled()
         ? "  Auth: OPEN — no API keys configured yet"
