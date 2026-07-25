@@ -126,7 +126,17 @@ export class Store {
     return this.data.keys.find((k) => k.key === key && !k.revokedAt);
   }
 
-  hasKeys(): boolean {
+  /**
+   * Whether authentication is enforced. True as soon as a key has ever been
+   * provisioned — including when every key is currently revoked, otherwise
+   * revoking the last key would silently reopen the server to everyone.
+   */
+  authEnabled(): boolean {
+    return this.data.keys.length > 0;
+  }
+
+  /** Whether any key can currently authenticate (all revoked = none). */
+  hasActiveKeys(): boolean {
     return this.data.keys.some((k) => !k.revokedAt);
   }
 
