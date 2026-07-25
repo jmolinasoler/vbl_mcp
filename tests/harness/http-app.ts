@@ -33,6 +33,10 @@ export interface HttpHarness {
   createKey(label: string): Promise<{ id: string; label: string; key: string }>;
   /** Connects a real MCP client over Streamable HTTP using `apiKey`. */
   connectMcp(apiKey?: string): Promise<Client>;
+  /** Posts the login form; returns the raw response (no redirect following). */
+  postLogin(username: string, password: string, next?: string): Promise<Response>;
+  /** Logs in and returns the Cookie header value to replay on later requests. */
+  login(username: string, password: string): Promise<string>;
   close(): Promise<void>;
 }
 
@@ -45,6 +49,8 @@ export async function startHttpHarness(options: HarnessOptions = {}): Promise<Ht
   const ownsDataDir = !options.dataDir;
   const dataDir = options.dataDir ?? mkdtempSync(join(tmpdir(), "vbl-mcp-test-"));
   const handle = createApp({ ...options, dataDir });
+  // Seeding the first user hashes a password, which is async.
+  await handle.ready;
 
   const server: Server = await new Promise((resolve) => {
     const s = handle.app.listen(0, "127.0.0.1", () => resolve(s));
@@ -72,6 +78,17 @@ export async function startHttpHarness(options: HarnessOptions = {}): Promise<Ht
     return { status: res.status, body: await res.json().catch(() => null) };
   };
 
+  const postLogin: HttpHarness["postLogin"] = (username, password, next) => {
+    const body = new URLSearchParams({ username, password });
+    if (next !== undefined) body.set("next", next);
+    return doFetch("/login", {
+      method: "POST",
+      headers: { "content-type": "application/x-www-form-urlencoded" },
+      body: body.toString(),
+      redirect: "manual",
+    });
+  };
+
   return {
     url,
     dataDir,
@@ -82,6 +99,14 @@ export async function startHttpHarness(options: HarnessOptions = {}): Promise<Ht
       const { status, body } = await admin("POST", "/admin/keys", { label });
       if (status !== 201) throw new Error(`createKey failed: ${status} ${JSON.stringify(body)}`);
       return body;
+    },
+    postLogin,
+    async login(username, password) {
+      const res = await postLogin(username, password);
+      const setCookie = res.headers.get("set-cookie");
+      if (!setCookie) throw new Error(`login failed: ${res.status} ${await res.text()}`);
+      // Keep just the name=value pair for replaying as a Cookie header.
+      return setCookie.split(";")[0];
     },
     async connectMcp(apiKey) {
       const client = new Client({ name: "http-test-client", version: "1.0.0" });

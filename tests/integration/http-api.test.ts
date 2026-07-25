@@ -60,11 +60,11 @@ describe("public endpoints", () => {
     }
   });
 
-  it("hides the key-management UI when no admin token is configured", async () => {
+  it("hides the key-management UI from a visitor who is not signed in", async () => {
     const h = await startHttpHarness();
     try {
       const html = await h.fetch("/").then((r) => r.text());
-      expect(html).toContain("Key management is disabled");
+      expect(html).toContain("Sign in to create or revoke API keys");
       expect(html).not.toContain('id="mk"');
     } finally {
       await h.close();

@@ -8,7 +8,7 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 
-export const VERSION = "0.4.0";
+export const VERSION = "0.5.0";
 export const DEFAULT_BASE_URL = "http://vblcb.wisseq.eu/VBLCB_WebService/data";
 
 /**

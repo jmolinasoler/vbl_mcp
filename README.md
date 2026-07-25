@@ -17,7 +17,8 @@ Official API documentation: [ApiDocV2.pdf](docs/ApiDocV2.pdf) ([source](https://
 - **Two transports**: stdio (local MCP clients) and Streamable HTTP (`/mcp`) for deployments.
 - **Status dashboard** at `/` (HTTP mode): uptime, active sessions with client name/IP/last activity, tool-usage counters and a recent-calls log — so you can see who is using the server. Auto-refreshes every 15 s; stats are in-memory and reset on restart.
 - **Health endpoint** at `/health`: JSON with uptime, session/call counters and a cached (60 s) reachability check of the upstream VBL API.
-- **API key management from the app**: create and revoke keys from the dashboard (or via `/admin/keys`), protected by an admin token. Keys can also be seeded via `MCP_API_KEYS` (`hermes:key1,claude:key2`); all of them require the `X-API-Key` header on `/mcp` (the dashboard and `/health` stay open).
+- **Login-protected dashboard**: a username/password account (seeded from `ADMIN_USERNAME`/`ADMIN_PASSWORD`) guards the status page and the admin API. Passwords are scrypt-hashed, sessions are HTTP-only `SameSite=Strict` cookies persisted across restarts, and repeated failed logins are rate-limited. `/health` stays public for container health checks.
+- **API key management from the app**: create and revoke keys from the dashboard once signed in (or via `/admin/keys`). Keys can also be seeded via `MCP_API_KEYS` (`hermes:key1,claude:key2`); all of them require the `X-API-Key` header on `/mcp`.
 - **Usage metering per request**: every tool call records estimated tokens in/out (≈ characters ÷ 4) and duration. Aggregates per key and per tool are **persisted** to disk as the basis for usage-based billing; the dashboard shows per-request consumption and per-key totals.
 
 ## Tools
@@ -101,11 +102,11 @@ Run it:
 ```bash
 docker run -d --name vbl-mcp -p 3000:3000 \
   -v vbl-mcp-data:/app/data \
-  -e ADMIN_TOKEN=change-me-admin \
+  -e ADMIN_USERNAME=admin -e ADMIN_PASSWORD=change-me \
   vbl-mcp
 ```
 
-Then open `http://localhost:3000/`, paste the admin token and create your first API key from the dashboard. The `/app/data` volume keeps keys and usage metering across restarts. You can also seed keys via `-e MCP_API_KEYS="hermes:change-me"`.
+Then open `http://localhost:3000/`, sign in, and create your first API key from the dashboard. The `/app/data` volume keeps users, sessions, keys and usage metering across restarts. You can also seed keys via `-e MCP_API_KEYS="hermes:change-me"`.
 
 Verify:
 
@@ -123,14 +124,28 @@ The image is a multi-stage build (Node 22 alpine, dev dependencies pruned, runs 
 | `PORT` | `3000` | HTTP listen port |
 | `MCP_TRANSPORT` | – | Set to `http` to force HTTP mode (the container CMD already passes `--http`) |
 | `MCP_API_KEYS` | – | Seed API keys, comma-separated and optionally labeled: `label:key,label2:key2`. Imported into the persistent store at startup |
-| `ADMIN_TOKEN` | – | Enables the admin API and the key-management UI on the dashboard (`X-Admin-Token` header). Unset = key management disabled |
+| `ADMIN_USERNAME` | – | Dashboard account, created on first start. **Unset = the dashboard stays public** |
+| `ADMIN_PASSWORD` | – | Password for that account. Only used to create it; changing it later from the UI wins over the variable |
+| `SESSION_TTL_HOURS` | `168` (7 days) | Login session lifetime |
+| `ADMIN_TOKEN` | – | Optional `X-Admin-Token` for scripts hitting `/admin/*`. A login session authorizes the same endpoints |
 | `DATA_DIR` | `./data` (`/app/data` in Docker) | Where API keys and usage metering are persisted (`store.json`) |
+
+## Dashboard login
+
+Set `ADMIN_USERNAME` and `ADMIN_PASSWORD` and the account is created on first start; from then on `/` asks for a login and the admin API accepts that session. The password is only read to create the account — changing it from the UI is permanent, and restarting with the old variable does not reset it.
+
+- Passwords are hashed with scrypt and a per-password salt; the plaintext is never stored.
+- Sessions are opaque, HTTP-only, `SameSite=Strict` cookies (which is also the CSRF defence for the admin endpoints), `Secure` when the request arrives over HTTPS. They live in the store, so a restart does not sign you out.
+- Changing your password signs every browser out, including the current one.
+- After 10 failed attempts for a username+IP, logins are refused for 15 minutes.
+
+> **Leaving `ADMIN_USERNAME` unset keeps the dashboard public**, as it was before this feature, so upgrading an existing deployment cannot lock you out. The page then shows a warning banner — the dashboard exposes client IPs and usage, so configure an account on any public instance.
 
 ## API keys & usage metering
 
-Set `ADMIN_TOKEN` and the dashboard (`/`) gains a key-management panel: paste the admin token, give the key a label (one per client) and hit **Create API key** — the full key is shown only once. Revoking a key immediately returns 401 to its clients.
+Sign in and the dashboard gains a key-management panel: give the key a label (one per client) and hit **Create API key** — the full key is shown only once. Revoking a key immediately returns 401 to its clients.
 
-The same operations are available as an admin API (header `X-Admin-Token`):
+The same operations are available as an admin API, authorized by your login cookie or by `X-Admin-Token` if you set `ADMIN_TOKEN` for scripts:
 
 ```bash
 # create
@@ -171,8 +186,8 @@ docker push jmolinaso/vbl-mcp:latest
 
 1. In Coolify: **+ New → Docker Image** and enter the image name: `jmolinaso/vbl-mcp:latest`.
 2. **Ports Exposes**: `3000`.
-3. (Recommended) Add the environment variable `ADMIN_TOKEN` with a strong secret, then create per-client API keys from the dashboard (or seed them with `MCP_API_KEYS`).
-4. In **Persistent Storage**, add a volume mounted at `/app/data` so API keys and usage metering survive redeploys.
+3. Add `ADMIN_USERNAME` and `ADMIN_PASSWORD` so the dashboard requires a login, then create per-client API keys from it (or seed them with `MCP_API_KEYS`).
+4. In **Persistent Storage**, add a volume mounted at `/app/data` so users, sessions, API keys and usage metering survive redeploys.
 5. (Optional) In **Health Checks**, set the path to `/health` on port `3000` — or rely on the image's built-in Docker `HEALTHCHECK`.
 6. Assign a domain and deploy. Coolify handles HTTPS via its proxy.
 
