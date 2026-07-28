@@ -25,10 +25,33 @@ credentials that your MCP clients use to access your `vbl-mcp` HTTP deployment.
 | Credential | Header or location | Used for |
 |---|---|---|
 | MCP API key | `X-API-Key` | Calling `/mcp` from an MCP client |
-| Admin token | `X-Admin-Token` | Scripted access to `/admin/keys` |
+| Admin token | `X-Admin-Token` | Scripted access to `/admin/keys` with admin privileges |
 | Dashboard account | Login form and HTTP-only session cookie | Dashboard access and key management in the browser |
 
 An `X-Admin-Token` is not an MCP API key. Do not send it to `/mcp`.
+
+## Roles and permissions
+
+Dashboard accounts have one of two roles. The account seeded from
+`ADMIN_USERNAME`/`ADMIN_PASSWORD` is always an `admin`.
+
+| Capability | `admin` | `user` |
+|---|---|---|
+| Create accounts (`POST /admin/users`) | Yes | No |
+| List and delete accounts | Yes | No |
+| Number of API keys | Unlimited | Up to 3 active keys |
+| Keys visible on the dashboard and `GET /admin/keys` | All keys | Only their own |
+| Revoke keys | Any key, including other users' | Only their own |
+| Sessions, client IPs, and the call log | Yes | No |
+
+Only an admin can create new accounts; there is no self-service registration.
+A non-admin who reaches the limit must revoke one of their own keys before
+creating another. Revoking frees a slot immediately, because only active keys
+count toward the quota.
+
+Keys seeded through `MCP_API_KEYS` or created with `X-Admin-Token` have no
+owner. They are never counted against a user's quota and are only visible to
+admins.
 
 ## Choose a provisioning method
 
@@ -87,6 +110,43 @@ For Coolify, define `MCP_API_KEYS` in the application's environment variables.
 The repository includes the corresponding commented setting in
 [`examples/docker-compose.coolify.yml`](../examples/docker-compose.coolify.yml).
 
+## Create user accounts
+
+Accounts are created by an admin, either from the dashboard's **Users** panel or
+through the admin API. New accounts default to the `user` role.
+
+```bash
+# as an admin, using a login session cookie
+curl -sS -X POST https://your-domain.example/admin/users \
+  -H "Content-Type: application/json" \
+  -b "vbl_session=$SESSION" \
+  -d '{"username":"player","password":"at-least-8-characters"}'
+```
+
+Pass `"role":"admin"` to create another administrator:
+
+```bash
+curl -sS -X POST https://your-domain.example/admin/users \
+  -H "Content-Type: application/json" \
+  -b "vbl_session=$SESSION" \
+  -d '{"username":"second-admin","password":"at-least-8-characters","role":"admin"}'
+```
+
+The response contains the public user record and never any password material.
+Passwords must be at least 8 characters. A duplicate username returns `409`, and
+a non-admin attempting any of these calls receives `403`.
+
+List or delete accounts:
+
+```bash
+curl -sS https://your-domain.example/admin/users -b "vbl_session=$SESSION"
+curl -sS -X DELETE https://your-domain.example/admin/users/<id> -b "vbl_session=$SESSION"
+```
+
+Deleting an account signs it out and revokes all of its API keys, so its
+clients stop authenticating immediately. The recorded usage of those keys is
+retained for billing. An admin cannot delete their own account.
+
 ## Create keys from the dashboard
 
 1. Set `ADMIN_USERNAME` and `ADMIN_PASSWORD` before the first start.
@@ -97,6 +157,10 @@ The repository includes the corresponding commented setting in
 
 The full generated key is displayed only once. Later dashboard views show a
 masked preview. Generated keys have the form `vbl_...`.
+
+Keys created this way belong to the signed-in account. A `user` sees only their
+own keys and their remaining quota; an admin sees every key together with its
+owner.
 
 The dashboard account is created only if that username does not already exist
 in the persistent store. Changing `ADMIN_PASSWORD` after the first start does
@@ -150,8 +214,13 @@ curl -sS -X DELETE https://your-domain.example/admin/keys/a1b2c3d4 \
   -H "X-Admin-Token: $ADMIN_TOKEN"
 ```
 
+Keys created with `X-Admin-Token` have no owner and are not subject to any
+quota.
+
 The admin API can also be authorized by the dashboard login session. A logged-in
-browser does not need `X-Admin-Token` for these endpoints.
+browser does not need `X-Admin-Token` for these endpoints. In that case the
+response is scoped to the signed-in account's role: an admin sees and manages
+every key, a `user` only their own.
 
 ## Configure an MCP client
 
@@ -251,6 +320,12 @@ Revocation takes effect immediately. Existing and new requests using the
 revoked key receive `401`. If the last remaining key is revoked, the server
 stays locked down rather than reopening in unauthenticated mode.
 
+A `user` can only revoke their own keys; attempting to revoke another account's
+key returns `404`, which avoids confirming that the key id exists. An admin can
+revoke any key. Because a non-admin is limited to 3 active keys, rotation for
+those accounts means revoking one key to free a slot before creating the
+replacement.
+
 Environment-provisioned keys are re-imported on every startup. If a revoked
 environment key remains in `MCP_API_KEYS`, the next startup reactivates it.
 Remove it from the deployment secret configuration when revoking it
@@ -293,6 +368,8 @@ persisted.
 - Mount `DATA_DIR` as protected persistent storage because it contains key material and usage records.
 - Rotate keys when a client is decommissioned or a secret may have been exposed.
 - Configure `ADMIN_USERNAME` and `ADMIN_PASSWORD` on public deployments.
+- Give people `user` accounts by default and reserve `admin` for operators who must manage accounts and every key.
+- Delete accounts that are no longer needed; this also revokes their keys.
 
 ## Troubleshooting
 
@@ -314,6 +391,23 @@ configuration as appropriate.
 
 Use either a valid dashboard login session or the exact `ADMIN_TOKEN` value in
 the `X-Admin-Token` header. An MCP client key cannot authorize admin endpoints.
+
+### `403` when creating a key
+
+The account is a non-admin that already holds 3 active keys. Revoke one of its
+keys to free a slot, or have an admin create the key instead. The response body
+reports the applicable `limit`.
+
+### `403` from `/admin/users`
+
+User management is restricted to admins. Sign in with an admin account or use
+`X-Admin-Token`.
+
+### A user cannot see a key they expect
+
+Non-admin accounts only ever see keys they own. Keys seeded through
+`MCP_API_KEYS`, created with `X-Admin-Token`, or created by another account are
+visible only to admins.
 
 ### A key disappeared after redeployment
 

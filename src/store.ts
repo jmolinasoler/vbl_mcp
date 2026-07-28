@@ -31,12 +31,34 @@ export interface ApiKey {
   source: "admin" | "env";
   createdAt: string;
   revokedAt?: string;
+  /**
+   * Dashboard user the key belongs to. Absent for keys seeded from the
+   * environment or created with ADMIN_TOKEN, which have no owner.
+   */
+  ownerId?: string;
   usage: KeyUsage;
 }
 
 /** Masked view safe to list on the dashboard / admin API. */
 export interface ApiKeyPublic extends Omit<ApiKey, "key"> {
   keyPreview: string;
+}
+
+/**
+ * Admins manage users and every key; a plain user only ever sees and revokes
+ * their own keys, up to MAX_KEYS_PER_NON_ADMIN.
+ */
+export type Role = "admin" | "user";
+
+/** Active keys a non-admin may hold at once. */
+export const MAX_KEYS_PER_NON_ADMIN = 3;
+
+/** Thrown when a non-admin tries to exceed their key quota. */
+export class KeyQuotaExceededError extends Error {
+  constructor(readonly limit: number = MAX_KEYS_PER_NON_ADMIN) {
+    super(`API key limit reached: a user may hold at most ${limit} active keys`);
+    this.name = "KeyQuotaExceededError";
+  }
 }
 
 export interface User {
@@ -46,6 +68,7 @@ export interface User {
   passwordHash: string;
   salt: string;
   source: "env" | "admin";
+  role: Role;
   createdAt: string;
   lastLoginAt?: string;
 }
@@ -89,6 +112,10 @@ export class Store {
       // Files written before users/sessions existed lack those arrays.
       this.data = { keys: [], users: [], sessions: [], ...loaded };
       for (const k of this.data.keys) k.usage = { ...emptyUsage(), ...k.usage };
+      // Accounts stored before roles existed were the sole operator account:
+      // treat them as admins so an upgrade cannot lock anyone out of user and
+      // key management.
+      for (const u of this.data.users) u.role ??= "admin";
     } else {
       this.data = { keys: [], users: [], sessions: [] };
     }
@@ -160,18 +187,49 @@ export class Store {
     this.scheduleSave();
   }
 
-  createKey(label: string): ApiKey {
+  /**
+   * Mints a key. When `ownerId` is a non-admin user the quota is enforced
+   * here, in the store, so no caller can bypass it. Keys created without an
+   * owner (env seeding, ADMIN_TOKEN scripts) are unlimited.
+   */
+  createKey(label: string, ownerId?: string): ApiKey {
+    if (ownerId && !this.isAdmin(ownerId) && this.activeKeyCountFor(ownerId) >= MAX_KEYS_PER_NON_ADMIN) {
+      throw new KeyQuotaExceededError();
+    }
     const apiKey: ApiKey = {
       id: randomBytes(4).toString("hex"),
       label: label.trim() || "unnamed",
       key: `vbl_${randomBytes(24).toString("hex")}`,
       source: "admin",
       createdAt: new Date().toISOString(),
+      ...(ownerId ? { ownerId } : {}),
       usage: emptyUsage(),
     };
     this.data.keys.push(apiKey);
     this.saveNow();
     return apiKey;
+  }
+
+  /** Active keys held by a user, i.e. what counts toward the quota. */
+  activeKeyCountFor(ownerId: string): number {
+    return this.data.keys.filter((k) => k.ownerId === ownerId && !k.revokedAt).length;
+  }
+
+  findKeyById(id: string): ApiKey | undefined {
+    return this.data.keys.find((k) => k.id === id);
+  }
+
+  /** Revokes every active key of a user, e.g. when the account is deleted. */
+  revokeKeysOwnedBy(ownerId: string) {
+    const now = new Date().toISOString();
+    let changed = false;
+    for (const k of this.data.keys) {
+      if (k.ownerId === ownerId && !k.revokedAt) {
+        k.revokedAt = now;
+        changed = true;
+      }
+    }
+    if (changed) this.saveNow();
   }
 
   revokeKey(id: string): boolean {
@@ -209,9 +267,19 @@ export class Store {
     }));
   }
 
+  /** Masked keys of one owner — what a non-admin is allowed to see. */
+  listKeysOwnedBy(ownerId: string): ApiKeyPublic[] {
+    return this.listKeys().filter((k) => k.ownerId === ownerId);
+  }
+
   // ---- Dashboard users ----
 
-  createUser(username: string, credentials: PasswordHash, source: User["source"]): User {
+  createUser(
+    username: string,
+    credentials: PasswordHash,
+    source: User["source"],
+    role: Role = "user"
+  ): User {
     const name = username.trim().toLowerCase();
     if (!name) throw new Error("Username must not be empty");
     if (this.findUser(name)) throw new Error(`User "${name}" already exists`);
@@ -221,6 +289,7 @@ export class Store {
       passwordHash: credentials.hash,
       salt: credentials.salt,
       source,
+      role,
       createdAt: new Date().toISOString(),
     };
     this.data.users.push(user);
@@ -245,6 +314,10 @@ export class Store {
     return this.data.users.length > 0;
   }
 
+  isAdmin(id: string): boolean {
+    return this.findUserById(id)?.role === "admin";
+  }
+
   setPassword(id: string, credentials: PasswordHash): boolean {
     const user = this.findUserById(id);
     if (!user) return false;
@@ -266,6 +339,9 @@ export class Store {
     this.data.users = this.data.users.filter((u) => u.id !== id);
     if (this.data.users.length === before) return false;
     this.deleteUserSessions(id);
+    // The account is gone, so its keys must stop authenticating. They are
+    // revoked rather than deleted: their usage stays billable.
+    this.revokeKeysOwnedBy(id);
     this.saveNow();
     return true;
   }

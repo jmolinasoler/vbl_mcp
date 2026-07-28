@@ -3,11 +3,14 @@
  * showing who is using the server and what each API key consumes, admin
  * endpoints to manage API keys, and a health endpoint (/health).
  *
- * Auth model (single-tenant):
+ * Auth model:
  *  - Clients call /mcp with an X-API-Key header. Keys come from the
  *    MCP_API_KEYS env var and/or are created at runtime via the admin API.
- *  - Admin endpoints (/admin/*) require the X-Admin-Token header matching
- *    the ADMIN_TOKEN env var; they are disabled when ADMIN_TOKEN is unset.
+ *  - Dashboard accounts have a role. An admin manages users and every key; a
+ *    plain user only sees and revokes their own keys, capped at
+ *    MAX_KEYS_PER_NON_ADMIN. Only admins can create accounts (/admin/users).
+ *  - Admin endpoints also accept the X-Admin-Token header matching the
+ *    ADMIN_TOKEN env var, which acts with admin privileges for scripts.
  *  - Usage (requests + estimated tokens in/out, per key and per tool) is
  *    persisted to DATA_DIR/store.json as the metering basis for billing.
  */
@@ -17,7 +20,14 @@ import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/
 import { isInitializeRequest } from "@modelcontextprotocol/sdk/types.js";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { createServer, baseUrl, VERSION } from "./vbl.js";
-import { Store, type User } from "./store.js";
+import {
+  KeyQuotaExceededError,
+  MAX_KEYS_PER_NON_ADMIN,
+  Store,
+  type ApiKeyPublic,
+  type Role,
+  type User,
+} from "./store.js";
 import { hashPassword, parseCookies, safeNextPath, verifyPassword } from "./auth.js";
 
 interface SessionInfo {
@@ -227,7 +237,9 @@ function dashboardHtml(
   store: Store,
   state: AppState,
   up: UpstreamStatus,
-  user: User | undefined
+  user: User | undefined,
+  /** Keys the viewer may see: all of them for an admin, own keys otherwise. */
+  visibleKeys: ApiKeyPublic[]
 ): string {
   const { startedAt, sessions, endedSessions, toolTotals, recentCalls } = state;
   const sessionRows = [...sessions.values()]
@@ -259,12 +271,21 @@ function dashboardHtml(
       </tr>`
     )
     .join("");
-  const keyRows = store
-    .listKeys()
+  const isAdmin = user?.role === "admin";
+  /**
+   * Sessions, IPs and the call log are operator data. A plain user must not see
+   * other clients' activity; when no account exists at all the dashboard keeps
+   * its historical public behaviour.
+   */
+  const showOperational = isAdmin || !store.hasUsers();
+  const ownerName = (ownerId: string | undefined) =>
+    ownerId ? store.findUserById(ownerId)?.username ?? "(deleted user)" : "—";
+  const keyRows = visibleKeys
     .map(
       (k) => `<tr${k.revokedAt ? ' class="revoked"' : ""}>
         <td><code>${esc(k.id)}</code></td>
         <td>${esc(k.label)} <span class="dim">${k.source === "env" ? "env" : ""}</span></td>
+        ${isAdmin ? `<td>${esc(ownerName(k.ownerId))}</td>` : ""}
         <td><code>${esc(k.keyPreview)}</code></td>
         <td>${esc(fmtAgo(k.createdAt))}</td>
         <td>${k.revokedAt ? `revoked ${esc(fmtAgo(k.revokedAt))}` : k.usage.lastUsedAt ? esc(fmtAgo(k.usage.lastUsedAt)) : "never used"}</td>
@@ -301,16 +322,65 @@ function dashboardHtml(
       ? `<span class="badge ok">reachable</span>`
       : `<span class="badge err">unreachable</span>`;
   const signedIn = Boolean(user);
+  const activeOwned = user ? visibleKeys.filter((k) => k.ownerId === user.id && !k.revokedAt).length : 0;
+  const quotaReached = signedIn && !isAdmin && activeOwned >= MAX_KEYS_PER_NON_ADMIN;
+  const quotaNote = isAdmin
+    ? `<span class="dim">Unlimited keys (administrator)</span>`
+    : `<span class="dim">${activeOwned} of ${MAX_KEYS_PER_NON_ADMIN} keys used</span>`;
   const adminSection = signedIn
     ? `<div class="adminbar">
         <label>New key label <input id="lbl" placeholder="e.g. hermes"></label>
-        <button id="mk">Create API key</button>
+        <button id="mk"${quotaReached ? " disabled" : ""}>Create API key</button>
+        ${quotaNote}
         <span id="keymsg"></span>
-      </div>`
+      </div>
+      ${
+        quotaReached
+          ? `<div class="warn">You have reached the limit of ${MAX_KEYS_PER_NON_ADMIN} active keys. Revoke one to create another.</div>`
+          : ""
+      }`
     : `<div class="dim">Sign in to create or revoke API keys.</div>`;
+  const userRows = isAdmin
+    ? store
+        .listUsers()
+        .map(
+          (u) => `<tr>
+        <td>${esc(u.username)}</td>
+        <td>${u.role === "admin" ? '<span class="badge ok">admin</span>' : "user"}</td>
+        <td>${esc(u.source)}</td>
+        <td>${esc(fmtAgo(u.createdAt))}</td>
+        <td>${u.lastLoginAt ? esc(fmtAgo(u.lastLoginAt)) : "never"}</td>
+        <td>${
+          u.id === user?.id
+            ? '<span class="dim">you</span>'
+            : `<button class="revoke deluser" data-id="${esc(u.id)}" data-name="${esc(u.username)}">delete</button>`
+        }</td>
+      </tr>`
+        )
+        .join("")
+    : "";
+  const usersSection = isAdmin
+    ? `<section>
+  <h2>Users</h2>
+  <div class="adminbar">
+    <label>Username <input id="nu" placeholder="e.g. player"></label>
+    <label>Password <input id="np" type="password" placeholder="at least ${MIN_PASSWORD_LENGTH} characters"></label>
+    <label>Role
+      <select id="nr">
+        <option value="user">user (max ${MAX_KEYS_PER_NON_ADMIN} keys)</option>
+        <option value="admin">admin (unlimited)</option>
+      </select>
+    </label>
+    <button id="cu">Create user</button>
+    <span id="usermsg"></span>
+  </div>
+  <table style="max-width:60rem"><thead><tr><th>Username</th><th>Role</th><th>Source</th><th>Created</th><th>Last login</th><th></th></tr></thead><tbody>${userRows}</tbody></table>
+</section>`
+    : "";
   const userBar = user
     ? `<div class="userbar">
         Signed in as <strong>${esc(user.username)}</strong>
+        <span class="badge ${user.role === "admin" ? "ok" : "err"}">${esc(user.role)}</span>
         <button id="pw" class="secondary">Change password</button>
         <form method="post" action="/logout" style="display:inline"><button class="secondary" type="submit">Log out</button></form>
       </div>`
@@ -366,36 +436,49 @@ ${noUserWarning}
   <div class="card"><div class="label">VBL API</div><div class="value">${upBadge}</div><div class="dim">${esc(up.detail)} · ${esc(fmtAgo(up.checkedAt))}</div></div>
 </div>
 <section>
-  <h2>API keys &amp; usage (persisted)</h2>
+  <h2>API keys &amp; usage (persisted)${isAdmin ? "" : signedIn ? " — yours" : ""}</h2>
   ${adminSection}
   ${keyRows
-    ? `<table><thead><tr><th>ID</th><th>Label</th><th>Key</th><th>Created</th><th>Status / last used</th><th>Requests</th><th>Errors</th><th>Tokens in</th><th>Tokens out</th><th></th></tr></thead><tbody>${keyRows}</tbody></table>`
-    : `<div class="empty">No API keys yet${signedIn ? " — create one above" : ""}. Without keys, /mcp is open.</div>`}
+    ? `<table><thead><tr><th>ID</th><th>Label</th>${isAdmin ? "<th>Owner</th>" : ""}<th>Key</th><th>Created</th><th>Status / last used</th><th>Requests</th><th>Errors</th><th>Tokens in</th><th>Tokens out</th><th></th></tr></thead><tbody>${keyRows}</tbody></table>`
+    : `<div class="empty">No API keys yet${signedIn ? " — create one above" : ""}.${isAdmin || !signedIn ? " Without keys, /mcp is open." : ""}</div>`}
 </section>
-<section>
+${usersSection}
+${
+  showOperational
+    ? `<section>
   <h2>Active sessions (who is connected now)</h2>
-  ${sessionRows
-    ? `<table><thead><tr><th>Session</th><th>Client</th><th>API key</th><th>IP</th><th>Connected</th><th>Last activity</th><th>Calls</th><th>Tokens in/out</th></tr></thead><tbody>${sessionRows}</tbody></table>`
-    : `<div class="empty">No active sessions.</div>`}
+  ${
+    sessionRows
+      ? `<table><thead><tr><th>Session</th><th>Client</th><th>API key</th><th>IP</th><th>Connected</th><th>Last activity</th><th>Calls</th><th>Tokens in/out</th></tr></thead><tbody>${sessionRows}</tbody></table>`
+      : `<div class="empty">No active sessions.</div>`
+  }
 </section>
 <section>
   <h2>Tool usage (since start)</h2>
-  ${toolRows
-    ? `<table style="max-width:45rem"><thead><tr><th>Tool</th><th>Calls</th><th>Tokens in</th><th>Tokens out</th></tr></thead><tbody>${toolRows}</tbody></table>`
-    : `<div class="empty">No tool calls yet.</div>`}
+  ${
+    toolRows
+      ? `<table style="max-width:45rem"><thead><tr><th>Tool</th><th>Calls</th><th>Tokens in</th><th>Tokens out</th></tr></thead><tbody>${toolRows}</tbody></table>`
+      : `<div class="empty">No tool calls yet.</div>`
+  }
 </section>
 <section>
   <h2>Recent tool calls (consumption per request)</h2>
-  ${callRows
-    ? `<table><thead><tr><th>Time</th><th>Client</th><th>API key</th><th>Tool</th><th>Tokens in</th><th>Tokens out</th><th>Duration</th></tr></thead><tbody>${callRows}</tbody></table>`
-    : `<div class="empty">No tool calls yet.</div>`}
+  ${
+    callRows
+      ? `<table><thead><tr><th>Time</th><th>Client</th><th>API key</th><th>Tool</th><th>Tokens in</th><th>Tokens out</th><th>Duration</th></tr></thead><tbody>${callRows}</tbody></table>`
+      : `<div class="empty">No tool calls yet.</div>`
+  }
 </section>
 <section>
   <h2>Recently ended sessions</h2>
-  ${endedRows
-    ? `<table><thead><tr><th>Session</th><th>Client</th><th>API key</th><th>IP</th><th>Connected</th><th>Ended</th><th>Calls</th><th>Tokens in/out</th></tr></thead><tbody>${endedRows}</tbody></table>`
-    : `<div class="empty">None yet.</div>`}
-</section>
+  ${
+    endedRows
+      ? `<table><thead><tr><th>Session</th><th>Client</th><th>API key</th><th>IP</th><th>Connected</th><th>Ended</th><th>Calls</th><th>Tokens in/out</th></tr></thead><tbody>${endedRows}</tbody></table>`
+      : `<div class="empty">None yet.</div>`
+  }
+</section>`
+    : ""
+}
 <footer>Started ${esc(startedAt.toISOString())} · session/tool tables reset on restart, key usage is persisted · auto-refreshes every 15s (paused while a new key is shown)</footer>
 <script>
 (function () {
@@ -432,7 +515,29 @@ ${noUserWarning}
       .then(function (j) { alert(j.message || "Password changed."); location.href = "/login"; })
       .catch(function (e) { alert("Error: " + e.message); });
   });
-  document.querySelectorAll("button.revoke").forEach(function (b) {
+  var cu = document.getElementById("cu");
+  if (cu) cu.addEventListener("click", function () {
+    var msg = document.getElementById("usermsg");
+    call("POST", "/admin/users", {
+      username: document.getElementById("nu").value,
+      password: document.getElementById("np").value,
+      role: document.getElementById("nr").value,
+    })
+      .then(function (j) {
+        msg.textContent = "Created user " + j.username + " (" + j.role + ").";
+        location.reload();
+      })
+      .catch(function (e) { msg.textContent = "Error: " + e.message; });
+  });
+  document.querySelectorAll("button.deluser").forEach(function (b) {
+    b.addEventListener("click", function () {
+      if (!confirm("Delete user " + b.dataset.name + "? Their API keys will be revoked.")) return;
+      call("DELETE", "/admin/users/" + b.dataset.id)
+        .then(function () { location.reload(); })
+        .catch(function (e) { alert("Error: " + e.message); });
+    });
+  });
+  document.querySelectorAll("button.revoke:not(.deluser)").forEach(function (b) {
     b.addEventListener("click", function () {
       if (!confirm("Revoke key " + b.dataset.id + "? Clients using it will get 401.")) return;
       call("DELETE", "/admin/keys/" + b.dataset.id)
@@ -496,14 +601,15 @@ export function createApp(options: AppOptions = {}): AppHandle {
   /**
    * First-run bootstrap: create the dashboard account from the environment.
    * Only ever creates a user that does not exist — restarts must not reset a
-   * password the operator changed from the UI.
+   * password the operator changed from the UI. The seeded account is an admin:
+   * it is the one that provisions every other user.
    */
   const ready = (async () => {
     const username = options.adminUsername ?? process.env.ADMIN_USERNAME;
     const password = options.adminPassword ?? process.env.ADMIN_PASSWORD;
     if (!username || !password) return;
     if (store.findUser(username)) return;
-    store.createUser(username, await hashPassword(password), "env");
+    store.createUser(username, await hashPassword(password), "env", "admin");
   })();
 
   const app = express();
@@ -573,10 +679,31 @@ export function createApp(options: AppOptions = {}): AppHandle {
     res.redirect(302, `/login?next=${encodeURIComponent(req.originalUrl)}`);
   };
 
+  /**
+   * Who is calling an admin endpoint: a signed-in user (with their role) or a
+   * script holding ADMIN_TOKEN, which acts as an admin without owning keys.
+   */
+  interface Actor {
+    user?: User;
+    isAdmin: boolean;
+    /** Owner to attribute new keys to; undefined for the token, which owns none. */
+    ownerId?: string;
+  }
+
+  const actorOf = (req: Request): Actor | undefined => {
+    const user = currentUser(req);
+    if (user) return { user, isAdmin: user.role === "admin", ownerId: user.id };
+    if (adminToken && req.header("x-admin-token") === adminToken) return { isAdmin: true };
+    return undefined;
+  };
+
   /** Admin API: a logged-in session or the admin token both authorize. */
-  const requireAdmin = (req: Request, res: Response, next: NextFunction) => {
-    if (currentUser(req)) return next();
-    if (adminToken && req.header("x-admin-token") === adminToken) return next();
+  const requireActor = (req: Request, res: Response, next: NextFunction) => {
+    const actor = actorOf(req);
+    if (actor) {
+      res.locals.actor = actor;
+      return next();
+    }
     if (!adminToken && !store.hasUsers()) {
       res.status(403).json({
         error: "Admin API disabled: set ADMIN_USERNAME/ADMIN_PASSWORD to sign in, or ADMIN_TOKEN for scripts",
@@ -584,6 +711,14 @@ export function createApp(options: AppOptions = {}): AppHandle {
       return;
     }
     res.status(401).json({ error: "Unauthorized: sign in, or send a valid X-Admin-Token header" });
+  };
+
+  /** Endpoints reserved to admins: user management. */
+  const requireAdmin = (req: Request, res: Response, next: NextFunction) => {
+    requireActor(req, res, () => {
+      if ((res.locals.actor as Actor).isAdmin) return next();
+      res.status(403).json({ error: "Forbidden: administrator privileges required" });
+    });
   };
 
   // ---- Login ----
@@ -687,18 +822,91 @@ export function createApp(options: AppOptions = {}): AppHandle {
     res.json({ ok: true, message: "Password changed. Please sign in again." });
   });
 
+  // ---- Admin API (user management) ----
+
+  /** Public shape of a user: never leaks password material. */
+  const publicUser = (u: User) => ({
+    id: u.id,
+    username: u.username,
+    role: u.role,
+    source: u.source,
+    createdAt: u.createdAt,
+    lastLoginAt: u.lastLoginAt,
+  });
+
+  app.get("/admin/users", requireAdmin, (_req, res) => {
+    res.json({ users: store.listUsers() });
+  });
+
+  app.post("/admin/users", requireAdmin, async (req, res) => {
+    const username = String(req.body?.username ?? "").trim();
+    const password = String(req.body?.password ?? "");
+    const role: Role = req.body?.role === "admin" ? "admin" : "user";
+
+    if (!username) {
+      res.status(400).json({ error: "Username must not be empty" });
+      return;
+    }
+    if (password.length < MIN_PASSWORD_LENGTH) {
+      res.status(400).json({ error: `Password must be at least ${MIN_PASSWORD_LENGTH} characters` });
+      return;
+    }
+    if (store.findUser(username)) {
+      res.status(409).json({ error: `User "${username.toLowerCase()}" already exists` });
+      return;
+    }
+
+    const created = store.createUser(username, await hashPassword(password), "admin", role);
+    res.status(201).json(publicUser(created));
+  });
+
+  app.delete("/admin/users/:id", requireAdmin, (req, res) => {
+    const id = String(req.params.id);
+    const actor = res.locals.actor as Actor;
+    // Deleting yourself would leave you signed out mid-request, and could
+    // remove the last admin.
+    if (actor.user?.id === id) {
+      res.status(400).json({ error: "You cannot delete your own account" });
+      return;
+    }
+    if (store.deleteUser(id)) res.json({ ok: true });
+    else res.status(404).json({ error: "User not found" });
+  });
+
   // ---- Admin API (key management + usage export) ----
-  app.get("/admin/keys", requireAdmin, (_req, res) => {
-    res.json({ keys: store.listKeys() });
+  app.get("/admin/keys", requireActor, (_req, res) => {
+    const actor = res.locals.actor as Actor;
+    // A plain user must never see keys that are not theirs.
+    res.json({
+      keys: actor.isAdmin ? store.listKeys() : store.listKeysOwnedBy(actor.ownerId!),
+      ...(actor.isAdmin ? {} : { limit: MAX_KEYS_PER_NON_ADMIN }),
+    });
   });
-  app.post("/admin/keys", requireAdmin, (req, res) => {
+  app.post("/admin/keys", requireActor, (req, res) => {
+    const actor = res.locals.actor as Actor;
     const label = typeof req.body?.label === "string" ? req.body.label : "";
-    const created = store.createKey(label);
-    // The full key is returned only here; afterwards it is always masked.
-    res.status(201).json({ id: created.id, label: created.label, key: created.key });
+    try {
+      const created = store.createKey(label, actor.ownerId);
+      // The full key is returned only here; afterwards it is always masked.
+      res.status(201).json({ id: created.id, label: created.label, key: created.key });
+    } catch (e) {
+      if (e instanceof KeyQuotaExceededError) {
+        res.status(403).json({ error: e.message, limit: e.limit });
+        return;
+      }
+      throw e;
+    }
   });
-  app.delete("/admin/keys/:id", requireAdmin, (req, res) => {
-    if (store.revokeKey(String(req.params.id))) res.json({ ok: true });
+  app.delete("/admin/keys/:id", requireActor, (req, res) => {
+    const actor = res.locals.actor as Actor;
+    const key = store.findKeyById(String(req.params.id));
+    // A user may only revoke their own keys. Answering 404 for someone else's
+    // key avoids confirming that the id exists.
+    if (!key || (!actor.isAdmin && key.ownerId !== actor.ownerId)) {
+      res.status(404).json({ error: "Key not found or already revoked" });
+      return;
+    }
+    if (store.revokeKey(key.id)) res.json({ ok: true });
     else res.status(404).json({ error: "Key not found or already revoked" });
   });
 
@@ -721,7 +929,11 @@ export function createApp(options: AppOptions = {}): AppHandle {
 
   app.get("/", requireLogin, async (req, res) => {
     const up = await checkUpstream(state);
-    res.type("html").send(dashboardHtml(store, state, up, currentUser(req)));
+    const user = currentUser(req);
+    // A plain user's dashboard only ever renders their own keys.
+    const visibleKeys =
+      user && user.role !== "admin" ? store.listKeysOwnedBy(user.id) : store.listKeys();
+    res.type("html").send(dashboardHtml(store, state, up, user, visibleKeys));
   });
 
   app.post("/mcp", requireApiKey, async (req, res) => {
@@ -874,6 +1086,9 @@ export async function startHttp(port: number) {
         : "  Dashboard:     PUBLIC — set ADMIN_USERNAME and ADMIN_PASSWORD to require a login"
     );
     console.log(`  Admin API:     ${adminEnabled ? "session or X-Admin-Token" : "session only (no ADMIN_TOKEN set)"}`);
+    console.log(
+      `  Users:         created by an admin via POST /admin/users · non-admins may hold ${MAX_KEYS_PER_NON_ADMIN} keys`
+    );
     console.log(
       !store.authEnabled()
         ? "  Auth: OPEN — no API keys configured yet"

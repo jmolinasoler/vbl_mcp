@@ -18,6 +18,7 @@ Official API documentation: [ApiDocV2.pdf](docs/ApiDocV2.pdf) ([source](https://
 - **Status dashboard** at `/` (HTTP mode): uptime, active sessions with client name/IP/last activity, tool-usage counters and a recent-calls log — so you can see who is using the server. Auto-refreshes every 15 s; stats are in-memory and reset on restart.
 - **Health endpoint** at `/health`: JSON with uptime, session/call counters and a cached (60 s) reachability check of the upstream VBL API.
 - **Login-protected dashboard**: a username/password account (seeded from `ADMIN_USERNAME`/`ADMIN_PASSWORD`) guards the status page and the admin API. Passwords are scrypt-hashed, sessions are HTTP-only `SameSite=Strict` cookies persisted across restarts, and repeated failed logins are rate-limited. `/health` stays public for container health checks.
+- **Multiple accounts with roles**: the seeded account is an **admin** and is the only one that can create further accounts (dashboard **Users** panel or `POST /admin/users`) — there is no self-service signup. A plain **user** holds at most **3 active API keys** and only sees and revokes their own; an admin has unlimited keys and can revoke anyone's.
 - **API key management from the app**: create and revoke keys from the dashboard once signed in (or via `/admin/keys`). Keys can also be seeded via `MCP_API_KEYS` (`hermes:key1,claude:key2`); all of them require the `X-API-Key` header on `/mcp`.
 - **Usage metering per request**: every tool call records estimated tokens in/out (≈ characters ÷ 4) and duration. Aggregates per key and per tool are **persisted** to disk as the basis for usage-based billing; the dashboard shows per-request consumption and per-key totals.
 
@@ -141,9 +142,32 @@ Set `ADMIN_USERNAME` and `ADMIN_PASSWORD` and the account is created on first st
 
 > **Leaving `ADMIN_USERNAME` unset keeps the dashboard public**, as it was before this feature, so upgrading an existing deployment cannot lock you out. The page then shows a warning banner — the dashboard exposes client IPs and usage, so configure an account on any public instance.
 
+## Accounts & roles
+
+The seeded `ADMIN_USERNAME` account is an **admin**. Admins create every other account from the dashboard's **Users** panel or the API; users cannot register themselves.
+
+| | admin | user |
+|---|---|---|
+| Create / list / delete accounts | yes | no |
+| API keys | unlimited | max **3** active |
+| Keys it can see and revoke | all, with their owner | only its own |
+| Sessions, client IPs, call log | yes | no |
+
+```bash
+# create a normal user (admin session or X-Admin-Token)
+curl -X POST https://your-domain/admin/users \
+  -H "X-Admin-Token: $ADMIN_TOKEN" -H "Content-Type: application/json" \
+  -d '{"username":"player","password":"at-least-8-characters"}'
+# add "role":"admin" for another operator
+curl https://your-domain/admin/users -H "X-Admin-Token: $ADMIN_TOKEN"           # list
+curl -X DELETE https://your-domain/admin/users/<id> -H "X-Admin-Token: $ADMIN_TOKEN"
+```
+
+Deleting an account signs it out and revokes its keys (usage stays for billing); an admin cannot delete itself. Accounts created before roles existed are treated as admins on upgrade, so nobody gets locked out. See the [API key guide](docs/API_KEYS.md) for the full permission matrix.
+
 ## API keys & usage metering
 
-Sign in and the dashboard gains a key-management panel: give the key a label (one per client) and hit **Create API key** — the full key is shown only once. Revoking a key immediately returns 401 to its clients.
+Sign in and the dashboard gains a key-management panel: give the key a label (one per client) and hit **Create API key** — the full key is shown only once. Revoking a key immediately returns 401 to its clients. A non-admin sees its own keys and its remaining quota (3 active keys); creating a fourth returns 403 until one is revoked.
 
 The same operations are available as an admin API, authorized by your login cookie or by `X-Admin-Token` if you set `ADMIN_TOKEN` for scripts:
 
@@ -158,7 +182,7 @@ curl https://your-domain/admin/keys -H "X-Admin-Token: $ADMIN_TOKEN"
 curl -X DELETE https://your-domain/admin/keys/<id> -H "X-Admin-Token: $ADMIN_TOKEN"
 ```
 
-Every tool call is metered: estimated tokens in (arguments) and out (response), computed as ≈ characters ÷ 4, plus duration and error flag. Aggregates per key and per tool are persisted in `DATA_DIR/store.json` — `GET /admin/keys` is effectively the billing export. The dashboard additionally shows the last 50 calls with their individual consumption. Single-tenant for now: one flat list of keys, one admin.
+Every tool call is metered: estimated tokens in (arguments) and out (response), computed as ≈ characters ÷ 4, plus duration and error flag. Aggregates per key and per tool are persisted in `DATA_DIR/store.json` — `GET /admin/keys` is effectively the billing export (scoped to your own keys unless you are an admin). The dashboard additionally shows the last 50 calls with their individual consumption.
 
 ## Publishing to Docker Hub
 
@@ -208,6 +232,7 @@ After deploying:
 - `https://your-domain/` — status dashboard (who is connected, tool usage).
 - `https://your-domain/health` — health check (JSON, includes upstream VBL API reachability).
 - `https://your-domain/mcp` — MCP Streamable HTTP endpoint for clients.
+- `https://your-domain/admin/users` — accounts (admin only); `https://your-domain/admin/keys` — API keys and usage.
 
 ## GUIDs
 
