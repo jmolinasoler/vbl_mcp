@@ -41,9 +41,15 @@ Two rules that keep the suite trustworthy:
 | Integration | `tests/integration/` | The real Express app over real HTTP with a real MCP client: login, admin API, metering end to end, persistence |
 
 For login tests, `startHttpHarness({ adminUsername, adminPassword })` seeds the
-account, `h.login(user, pass)` returns a Cookie header to replay, and
-`h.postLogin(...)` gives you the raw response when you need to assert on the
-status code or the `Set-Cookie` attributes.
+account (as an **admin**), `h.login(user, pass)` returns a Cookie header to
+replay, and `h.postLogin(...)` gives you the raw response when you need to
+assert on the status code or the `Set-Cookie` attributes.
+
+Role and quota behaviour lives in `tests/unit/multiuser.test.ts` (store: roles,
+key ownership, the 3-key limit) and `tests/integration/multiuser.test.ts`
+(endpoints: who may create accounts, whose keys are visible, who may revoke
+them). To act as a normal user, create one through `POST /admin/users` with the
+admin cookie and then `h.login()` as that user.
 
 Anything that would reach `vblcb.wisseq.eu` goes through the fake upstream.
 `tests/setup.ts` points `VBL_BASE_URL` at a dead address by default, so a test
@@ -105,7 +111,9 @@ admin token argument to omit the header entirely.
 
 ```ts
 const tmp = withTempStore();
-tmp.store.createKey("hermes");
+tmp.store.createKey("hermes");                       // unowned, unlimited
+const user = tmp.store.createUser("player", creds, "admin");        // role: "user"
+tmp.store.createKey("mine", user.id);                // counts toward the 3-key quota
 tmp.reopen();   // flush + reload from disk, i.e. a restart
 tmp.cleanup();
 ```
