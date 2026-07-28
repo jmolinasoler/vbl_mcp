@@ -6,7 +6,7 @@ MCP (Model Context Protocol) server for the public **Basketball Vlaanderen** (VB
 
 Repository: [github.com/jmolinasoler/vbl_mcp](https://github.com/jmolinasoler/vbl_mcp) · Docker image: [jmolinaso/vbl-mcp](https://hub.docker.com/r/jmolinaso/vbl-mcp) · Public instance: [vblmcp.valvestudio.io](https://vblmcp.valvestudio.io/)
 
-See [examples/](examples/README.md) for ready-made MCP client configurations (Claude Code, Hermes, stdio-only clients via `mcp-remote`), a Coolify Docker Compose file, and a [`/vbl` Agent Skill](examples/skills/vbl/SKILL.md) that runs the right queries from a single slash command.
+See [examples/](examples/README.md) for ready-made MCP client configurations (Claude Code, Hermes, stdio-only clients via `mcp-remote`), a Coolify Docker Compose file, and a [`/vbl` Agent Skill](examples/skills/vbl/SKILL.md) that runs the right queries from a single slash command. See the [API key guide](docs/API_KEYS.md) for provisioning, client configuration, rotation, and troubleshooting.
 
 Official API documentation: [ApiDocV2.pdf](docs/ApiDocV2.pdf) ([source](https://www.basketbal.vlaanderen/documenten/Clubondersteuning/ApiDocV2.pdf)).
 
