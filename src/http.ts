@@ -145,9 +145,72 @@ async function checkUpstream(state: AppState): Promise<UpstreamStatus> {
   return state.upstream;
 }
 
+/**
+ * Strips the IPv4-mapped IPv6 prefix and any `[...]`/port decoration, so a
+ * client that arrives as `::ffff:203.0.113.9` is not reported as a different
+ * visitor than the same client arriving as `203.0.113.9`.
+ */
+function normalizeIp(raw: string): string {
+  let ip = raw.trim();
+  if (ip.startsWith("[")) {
+    // RFC 7239 quotes IPv6 as "[2001:db8::1]:4711".
+    const end = ip.indexOf("]");
+    if (end > 0) ip = ip.slice(1, end);
+  } else if (ip.split(":").length === 2) {
+    // "203.0.113.9:54321" — a port only, never a bare IPv6 address.
+    ip = ip.slice(0, ip.indexOf(":"));
+  }
+  const mapped = /^::ffff:(\d{1,3}(?:\.\d{1,3}){3})$/i.exec(ip);
+  return mapped ? mapped[1] : ip;
+}
+
+/** Addresses that identify a proxy hop rather than a real client. */
+function isInternalIp(ip: string): boolean {
+  if (ip === "127.0.0.1" || ip === "::1" || ip === "unknown" || ip === "") return true;
+  if (/^10\./.test(ip)) return true;
+  if (/^192\.168\./.test(ip)) return true;
+  if (/^172\.(1[6-9]|2\d|3[01])\./.test(ip)) return true; // Docker/bridge range
+  if (/^169\.254\./.test(ip)) return true;
+  if (/^(fc|fd)/i.test(ip)) return true; // IPv6 unique-local
+  return false;
+}
+
+/**
+ * Best-effort real client address.
+ *
+ * Behind a reverse proxy (Coolify/Traefik, nginx) the socket peer is the proxy
+ * itself — a container-network address such as 172.18.0.x — so the forwarded
+ * headers are the only source of the caller's address. `X-Forwarded-For` is
+ * read left-to-right and the first non-proxy entry wins; when a proxy only
+ * reports its own hop we fall back to `X-Real-IP`, RFC 7239 `Forwarded`, and
+ * finally the socket. Any value beats returning the proxy's own address.
+ */
 function clientIp(req: Request): string {
-  const fwd = req.header("x-forwarded-for");
-  return (fwd ? fwd.split(",")[0].trim() : req.socket.remoteAddress) ?? "unknown";
+  const candidates: string[] = [];
+
+  // req.ips is the trust-proxy-aware X-Forwarded-For chain, client first.
+  const chain = req.ips?.length ? req.ips : [];
+  const xff = req.header("x-forwarded-for");
+  candidates.push(...(chain.length ? chain : xff ? xff.split(",") : []));
+
+  const realIp = req.header("x-real-ip");
+  if (realIp) candidates.push(realIp);
+
+  // RFC 7239: Forwarded: for=192.0.2.60;proto=http, for=198.51.100.17
+  const forwarded = req.header("forwarded");
+  if (forwarded) {
+    for (const hop of forwarded.split(",")) {
+      const match = /for=("?)([^;,"]+)\1/i.exec(hop);
+      if (match) candidates.push(match[2]);
+    }
+  }
+
+  if (req.socket.remoteAddress) candidates.push(req.socket.remoteAddress);
+
+  const seen = candidates.map(normalizeIp).filter((ip) => ip.length > 0);
+  // Prefer the first address that is not a proxy/container hop; otherwise keep
+  // whatever we saw so the dashboard still shows something concrete.
+  return seen.find((ip) => !isInternalIp(ip)) ?? seen[0] ?? "unknown";
 }
 
 function endSession(state: AppState, id: string) {
